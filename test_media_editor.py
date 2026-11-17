@@ -1,0 +1,222 @@
+import pathlib
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from media_editor import (
+    Clip,
+    EditorProject,
+    MediaInfo,
+    Track,
+    build_export_plan,
+    parse_editor_time,
+    clamp_media_time,
+    normalize_selection,
+    resize_clip_left,
+    resize_clip_right,
+    split_clip,
+    build_pitch_filter,
+    pitch_factor,
+    snap_timeline_position,
+    unlink_video_audio,
+    waveform_samples,
+    waveform_from_values,
+    playback_range,
+    waveform_segment,
+    avoid_clip_overlap,
+)
+
+
+def video_info(path="video.mp4", duration=20.0, audio=True):
+    return MediaInfo(
+        path=path,
+        duration=duration,
+        has_video=True,
+        has_audio=audio,
+        width=1920,
+        height=1080,
+        fps=30.0,
+        format_name="mp4",
+        video_codec="h264",
+        audio_codec="aac" if audio else None,
+    )
+
+
+def audio_info(path="audio.mp3", duration=12.0):
+    return MediaInfo(
+        path=path,
+        duration=duration,
+        has_video=False,
+        has_audio=True,
+        format_name="mp3",
+        audio_codec="mp3",
+    )
+
+
+class TimeAndModelTests(unittest.TestCase):
+    def test_timeline_cursor_maps_to_clip_source_time(self):
+        from media_editor import timeline_to_source_time
+        clip = Clip(video_info(duration=20), source_in=5, source_out=15, timeline_start=12)
+        self.assertEqual(timeline_to_source_time(clip, 15), 8.0)
+        self.assertIsNone(timeline_to_source_time(clip, 25))
+
+    def test_playback_starts_at_mark_in_and_ends_at_mark_out(self):
+        self.assertEqual(playback_range(25, 10, 40, 60, from_mark=True), (10.0, 40.0))
+        self.assertEqual(playback_range(25, 10, 40, 60), (25.0, 40.0))
+        self.assertEqual(playback_range(0, 0, 40, 60), (0.0, 40.0))
+    def test_visual_cursor_and_selection_stay_inside_media_duration(self):
+        self.assertEqual(clamp_media_time(-4, 120), 0)
+        self.assertEqual(clamp_media_time(145, 120), 120)
+        self.assertEqual(normalize_selection(90, 20, 120), (20, 90))
+        self.assertEqual(normalize_selection(90, 90, 120), (90, 120))
+
+    def test_editor_time_accepts_seconds_and_clock_formats(self):
+        self.assertEqual(parse_editor_time("90"), 90.0)
+        self.assertEqual(parse_editor_time("01:30"), 90.0)
+        self.assertEqual(parse_editor_time("01:02:03.5"), 3723.5)
+
+    def test_clip_validates_bounds_and_project_duration(self):
+        clip = Clip(video_info(), source_in=2, source_out=8, timeline_start=5)
+        self.assertEqual(clip.duration, 6)
+        project = EditorProject([Track("Vídeo 1", "video", clips=[clip])])
+        self.assertEqual(project.duration(), 11)
+        with self.assertRaisesRegex(ValueError, "posterior"):
+            Clip(video_info(), source_in=8, source_out=2)
+
+    def test_export_scope_excludes_disabled_tracks_or_uses_selected(self):
+        enabled = Track("V1", "video", clips=[Clip(video_info("one.mp4"))])
+        disabled = Track("V2", "video", enabled=False, clips=[Clip(video_info("two.mp4"))])
+        selected = Track("A1", "audio", clips=[Clip(audio_info("music.mp3"))])
+        project = EditorProject([enabled, disabled, selected], selected_track_index=2)
+        self.assertEqual(project.export_tracks("active"), [enabled, selected])
+        self.assertEqual(project.export_tracks("selected"), [selected])
+
+
+class ClipEditingTests(unittest.TestCase):
+    def test_move_is_clamped_to_front_or_back_of_neighbor_without_overlap(self):
+        ranges = [(0.0, 5.0), (10.0, 15.0)]
+        self.assertEqual(avoid_clip_overlap(4.0, 3.0, ranges), 5.0)
+        self.assertEqual(avoid_clip_overlap(9.0, 3.0, ranges), 7.0)
+        self.assertEqual(avoid_clip_overlap(6.0, 3.0, ranges), 6.0)
+
+    def test_waveform_segment_uses_source_in_and_out_without_changing_tempo(self):
+        source = [float(index) for index in range(10)]
+        segment = waveform_segment(source, 2, 6, 10, 4)
+        self.assertEqual(segment, [2.0, 3.0, 4.0, 5.0])
+
+    def test_waveform_from_values_creates_visible_rms_shape(self):
+        samples = waveform_from_values([0.0, 0.0, 0.5, 0.5, 1.0, 1.0], 3)
+        self.assertEqual(len(samples), 3)
+        self.assertEqual(samples[0], 0.0)
+        self.assertGreater(samples[2], samples[1])
+
+    def test_unlink_video_audio_preserves_timing_and_removes_link(self):
+        video = Clip(video_info(duration=30), source_in=4, source_out=12, timeline_start=7, link_group="g1")
+        audio = Clip(audio_info(duration=30), source_in=4, source_out=12, timeline_start=7, link_group="g1")
+        detached_video, detached_audio = unlink_video_audio(video, audio)
+        self.assertEqual((detached_video.timeline_start, detached_audio.timeline_start), (7, 7))
+        self.assertEqual((detached_video.duration, detached_audio.duration), (8, 8))
+        self.assertIsNone(detached_video.link_group)
+        self.assertIsNone(detached_audio.link_group)
+
+    @patch("media_editor.discover_ffmpeg_tools", side_effect=FileNotFoundError)
+    def test_waveform_has_safe_center_line_fallback(self, _tools):
+        self.assertEqual(waveform_samples("missing.wav", 5), [0.0] * 5)
+
+    def test_clip_pitch_is_kept_and_pitch_filter_preserves_duration(self):
+        clip = Clip(audio_info(), pitch_semitones=3)
+        self.assertEqual(clip.pitch_semitones, 3)
+        self.assertAlmostEqual(pitch_factor(12), 2.0)
+        filter_text = build_pitch_filter(3)
+        self.assertIn("asetrate=44100", filter_text)
+        self.assertIn("atempo=", filter_text)
+
+    def test_pitch_is_limited_to_twelve_semitones(self):
+        with self.assertRaises(ValueError):
+            Clip(audio_info(), pitch_semitones=13)
+        self.assertIsNone(build_pitch_filter(0))
+
+    def test_snap_aligns_start_or_end_to_nearest_candidate(self):
+        self.assertEqual(snap_timeline_position(4.92, 2.0, [5.0, 9.0], 0.12), (5.0, 5.0))
+        self.assertEqual(snap_timeline_position(7.08, 2.0, [5.0, 9.0], 0.12), (7.0, 9.0))
+        self.assertEqual(snap_timeline_position(4.5, 2.0, [5.0], 0.1), (4.5, None))
+
+    def test_split_clip_preserves_source_mapping_and_timeline_position(self):
+        clip = Clip(video_info(duration=30), source_in=10, source_out=20, timeline_start=5, name="Plano")
+
+        left, right = split_clip(clip, 7)
+
+        self.assertEqual((left.source_in, left.source_out, left.timeline_start), (10, 12, 5))
+        self.assertEqual((right.source_in, right.source_out, right.timeline_start), (12, 20, 7))
+        self.assertEqual(left.duration + right.duration, clip.duration)
+
+    def test_split_clip_ignores_positions_at_or_outside_clip_edges(self):
+        clip = Clip(video_info(duration=30), source_in=10, source_out=20, timeline_start=5)
+
+        self.assertIsNone(split_clip(clip, 5))
+        self.assertIsNone(split_clip(clip, 15))
+        self.assertIsNone(split_clip(clip, 25))
+
+    def test_resize_left_edge_can_shrink_or_recover_original_source(self):
+        clip = Clip(video_info(duration=30), source_in=10, source_out=20, timeline_start=5)
+
+        shrunk = resize_clip_left(clip, 7)
+        expanded = resize_clip_left(clip, 2)
+
+        self.assertEqual((shrunk.source_in, shrunk.source_out, shrunk.timeline_start), (12, 20, 7))
+        self.assertEqual((expanded.source_in, expanded.source_out, expanded.timeline_start), (7, 20, 2))
+
+    def test_resize_right_edge_can_shrink_or_recover_original_source(self):
+        clip = Clip(video_info(duration=30), source_in=10, source_out=20, timeline_start=5)
+
+        shrunk = resize_clip_right(clip, 8)
+        expanded = resize_clip_right(clip, 40)
+
+        self.assertEqual((shrunk.source_in, shrunk.source_out, shrunk.timeline_end), (10, 13, 8))
+        self.assertEqual((expanded.source_in, expanded.source_out, expanded.timeline_end), (10, 30, 25))
+
+
+class ExportPlanTests(unittest.TestCase):
+    def test_video_tracks_are_composited_bottom_to_top(self):
+        top = Track("Superior", "video", clips=[Clip(video_info("top.mp4"), source_out=5)])
+        bottom = Track("Inferior", "video", clips=[Clip(video_info("bottom.mp4"), source_out=5)])
+        plan = build_export_plan(EditorProject([top, bottom]), "active", None, "salida.mp4")
+        self.assertEqual(plan["video_track_order"], ["Inferior", "Superior"])
+        self.assertIn("overlay", plan["filter_complex"])
+
+    def test_muted_track_and_video_without_source_audio_are_not_mixed(self):
+        muted = Track("Mudo", "audio", muted=True, clips=[Clip(audio_info("muted.mp3"))])
+        no_audio = Track(
+            "Vídeo",
+            "video",
+            clips=[Clip(video_info("silent-choice.mp4"), use_source_audio=False)],
+        )
+        plan = build_export_plan(EditorProject([muted, no_audio]), "active", None, "salida.mp4")
+        self.assertEqual(plan["audio_labels"], [])
+
+    def test_audio_tracks_are_delayed_and_mixed_at_timeline_positions(self):
+        first = Track("A1", "audio", clips=[Clip(audio_info("a.mp3"), source_out=4, timeline_start=0)])
+        second = Track("A2", "audio", clips=[Clip(audio_info("b.mp3"), source_out=3, timeline_start=2.5)])
+        plan = build_export_plan(EditorProject([first, second]), "active", None, "salida.wav")
+        self.assertIn("adelay=2500|2500", plan["filter_complex"])
+        self.assertIn("aresample=async=1:first_pts=0", plan["filter_complex"])
+        self.assertIn("amix=inputs=2", plan["filter_complex"])
+        self.assertFalse(plan["has_video"])
+
+    def test_audio_pitch_is_present_in_export_filter(self):
+        track = Track("A1", "audio", clips=[Clip(audio_info("voice.mp3"), source_out=4, pitch_semitones=-2)])
+        plan = build_export_plan(EditorProject([track]), "active", None, "salida.mp3")
+        self.assertIn("asetrate=44100", plan["filter_complex"])
+        self.assertIn("atempo=", plan["filter_complex"])
+
+    def test_selected_export_contains_only_selected_track_inputs(self):
+        video = Track("V", "video", clips=[Clip(video_info("video.mp4"))])
+        audio = Track("A", "audio", clips=[Clip(audio_info("audio.mp3"))])
+        project = EditorProject([video, audio], selected_track_index=1)
+        plan = build_export_plan(project, "selected", None, "salida.mp3")
+        self.assertEqual(plan["inputs"], ["audio.mp3"])
+
+
+if __name__ == "__main__":
+    unittest.main()
+
