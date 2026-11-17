@@ -1,0 +1,6 @@
+# Runtime dependencies
+Pillow
+numpy
+psutil
+yt-dlp
+tkinterdnd2
