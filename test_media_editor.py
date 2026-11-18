@@ -395,6 +395,50 @@ class ExportPlanTests(unittest.TestCase):
             self.assertEqual(len(loaded.tracks), 1)
             self.assertEqual(loaded_h["A1"], 70.0)
 
+    def test_attached_pic_ignored_finite_validation_export_ext_and_waveform_timeout(self):
+        import json
+        import subprocess
+        from media_editor import probe_media, project_from_dict, clamp_track_height
+
+        # 1. Carátula embebida (attached_pic=1) en MP3 no convierte la canción en vídeo
+        payload = json.dumps({
+            "format": {"duration": "120.5", "format_name": "mp3"},
+            "streams": [
+                {"codec_type": "audio", "codec_name": "mp3", "duration": "120.5"},
+                {"codec_type": "video", "codec_name": "mjpeg", "width": 500, "height": 500, "disposition": {"attached_pic": 1}},
+            ],
+        })
+        fake = type("R", (), {"returncode": 0, "stdout": payload, "stderr": ""})()
+        with patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             patch("media_editor.subprocess.run", return_value=fake):
+            info = probe_media("cover.mp3")
+        self.assertFalse(info.has_video)
+        self.assertTrue(info.has_audio)
+
+        # 2. waveform_samples devuelve silencio si FFmpeg agota el timeout
+        with patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             patch("media_editor.subprocess.run", side_effect=subprocess.TimeoutExpired("ffmpeg", 30)):
+            self.assertEqual(waveform_samples("slow.mp4", 4), [0.0, 0.0, 0.0, 0.0])
+
+        # 3. Exportar vídeo rechaza extensiones no válidas y limita faststart a mp4/mov
+        vtrack = Track("V1", "video", clips=[Clip(video_info("v.mp4"), source_out=5)])
+        with self.assertRaisesRegex(ValueError, "MP4"):
+            build_export_plan(EditorProject([vtrack]), "active", None, "salida.txt")
+        mkv_plan = build_export_plan(EditorProject([vtrack]), "active", None, "salida.mkv")
+        mp4_plan = build_export_plan(EditorProject([vtrack]), "active", None, "salida.mp4")
+        self.assertNotIn("-movflags", mkv_plan["command"])
+        self.assertIn("-movflags", mp4_plan["command"])
+
+        # 4. parse_editor_time, clamp_track_height y project_from_dict rechazan NaN/Inf/bool
+        with self.assertRaises(ValueError):
+            parse_editor_time("nan")
+        with self.assertRaises(ValueError):
+            parse_editor_time(True)
+        with self.assertRaises(ValueError):
+            clamp_track_height(float("inf"))
+        with self.assertRaises(ValueError):
+            project_from_dict({"media": [{"path": "x.mp4", "duration": float("nan"), "has_video": True, "has_audio": False}], "tracks": []})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,6 +44,8 @@ def playback_range(cursor: float, mark_in: float, mark_out: float, duration: flo
 
 
 def parse_editor_time(value) -> float:
+    if isinstance(value, bool):
+        raise ValueError("Usa segundos, MM:SS o HH:MM:SS.")
     if isinstance(value, (int, float)):
         result = float(value)
     else:
@@ -55,6 +57,8 @@ def parse_editor_time(value) -> float:
             numbers = [float(part) for part in parts]
         except ValueError as exc:
             raise ValueError("Usa segundos, MM:SS o HH:MM:SS.") from exc
+        if any(not math.isfinite(part) for part in numbers):
+            raise ValueError("Usa segundos, MM:SS o HH:MM:SS.")
         if len(numbers) == 1:
             result = numbers[0]
         elif len(numbers) == 2:
@@ -63,7 +67,7 @@ def parse_editor_time(value) -> float:
             result = numbers[0] * 3600 + numbers[1] * 60 + numbers[2]
         else:
             raise ValueError("Usa segundos, MM:SS o HH:MM:SS.")
-    if result < 0:
+    if not math.isfinite(result) or result < 0:
         raise ValueError("El tiempo no puede ser negativo.")
     return result
 
@@ -269,7 +273,12 @@ def track_boundary_at(layout: list[tuple[float, float]], y: float, tolerance: fl
 
 
 def clamp_track_height(value: float) -> float:
-    return max(MIN_TRACK_HEIGHT, min(MAX_TRACK_HEIGHT, float(value)))
+    if isinstance(value, bool):
+        raise ValueError("Altura de pista no válida.")
+    height = float(value)
+    if not math.isfinite(height):
+        raise ValueError("Altura de pista no válida.")
+    return max(MIN_TRACK_HEIGHT, min(MAX_TRACK_HEIGHT, height))
 
 
 def unique_track_name(existing: list[str], kind: str) -> str:
@@ -451,14 +460,17 @@ def waveform_samples(path: str, sample_count: int = 240) -> list[float]:
     try:
         ffmpeg = discover_ffmpeg_tools()[0]
         command = [ffmpeg, "-v", "error", "-i", os.fspath(path), "-vn", "-ac", "1", "-ar", "8000", "-f", "f32le", "pipe:1"]
-        result = subprocess.run(command, capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        result = subprocess.run(
+            command, capture_output=True, timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
         if result.returncode or not result.stdout:
             return fallback
         values = [value[0] for value in struct.iter_unpack("<f", result.stdout) if value]
         if not values:
             return fallback
         return waveform_from_values(values, sample_count)
-    except (OSError, ValueError, struct.error):
+    except (OSError, ValueError, struct.error, subprocess.SubprocessError):
         return fallback
 
 
@@ -551,7 +563,14 @@ def probe_media(path: str) -> MediaInfo:
         raise ValueError(result.stderr.strip() or "No se pudo analizar el archivo.")
     data = json.loads(result.stdout)
     streams = data.get("streams", [])
-    video = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+    video = next(
+        (
+            stream for stream in streams
+            if stream.get("codec_type") == "video"
+            and not (stream.get("disposition") or {}).get("attached_pic")
+        ),
+        None,
+    )
     audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
     duration_values = [
         data.get("format", {}).get("duration"),
@@ -564,7 +583,7 @@ def probe_media(path: str) -> MediaInfo:
             candidate = float(value)
         except (TypeError, ValueError):
             continue
-        if candidate > 0:
+        if math.isfinite(candidate) and candidate > 0:
             duration = candidate
             break
     if duration <= 0:
@@ -740,8 +759,9 @@ def build_export_plan(
 
     extension = pathlib.Path(output_path).suffix.lower()
     audio_only_extensions = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
-    if first_video and extension in audio_only_extensions:
-        raise ValueError("Elige MP4, MOV, MKV o WEBM para exportar vídeo.")
+    video_extensions = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
+    if first_video and (extension in audio_only_extensions or extension not in video_extensions):
+        raise ValueError("Elige MP4, MOV, MKV, WEBM o AVI para exportar vídeo.")
     if not first_video and not final_audio:
         raise ValueError("No hay pistas de vídeo ni de audio activas para exportar (revisa si están silenciadas).")
     if not first_video and extension not in audio_only_extensions:
@@ -765,7 +785,9 @@ def build_export_plan(
             command += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"]
             if final_audio:
                 command += ["-c:a", "aac", "-b:a", "192k"]
-        command += ["-r", _number(fps), "-t", _number(duration), "-movflags", "+faststart"]
+        command += ["-r", _number(fps), "-t", _number(duration)]
+        if extension in {".mp4", ".mov"}:
+            command += ["-movflags", "+faststart"]
     elif final_audio:
         if extension == ".wav":
             command += ["-c:a", "pcm_s16le"]
@@ -911,15 +933,21 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
         if not isinstance(m, dict):
             raise ValueError("El archivo de proyecto contiene medios no válidos.")
         try:
+            dur = float(m["duration"])
+            if isinstance(m["duration"], bool) or not math.isfinite(dur) or dur <= 0:
+                raise ValueError("Duración inválida")
+            fps_val = float(m.get("fps") or 0.0)
+            if not math.isfinite(fps_val) or fps_val < 0:
+                fps_val = 0.0
             media_list.append(
                 MediaInfo(
                     path=str(m["path"]),
-                    duration=float(m["duration"]),
+                    duration=dur,
                     has_video=bool(m["has_video"]),
                     has_audio=bool(m["has_audio"]),
-                    width=int(m.get("width") or 0),
-                    height=int(m.get("height") or 0),
-                    fps=float(m.get("fps") or 0.0),
+                    width=max(0, int(m.get("width") or 0)),
+                    height=max(0, int(m.get("height") or 0)),
+                    fps=fps_val,
                     format_name=str(m.get("format_name") or ""),
                     video_codec=m.get("video_codec"),
                     audio_codec=m.get("audio_codec"),
@@ -939,6 +967,8 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
             if not isinstance(c, dict):
                 raise ValueError("El archivo de proyecto contiene clips no válidos.")
             try:
+                if isinstance(c["media_idx"], bool):
+                    raise ValueError("media_idx booleano")
                 media_idx = int(c["media_idx"])
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError("El archivo de proyecto tiene un índice de archivo inválido.") from exc
@@ -949,6 +979,11 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
             clip_has_video = c.get("clip_has_video", track_kind == "video" and base_media.has_video)
             clip_media = base_media if (clip_has_video or not base_media.has_video) else audio_media_from_video(base_media)
             try:
+                vol = float(1.0 if c.get("volume") is None else c.get("volume"))
+                f_in = float(c.get("fade_in") or 0.0)
+                f_out = float(c.get("fade_out") or 0.0)
+                if not (math.isfinite(vol) and math.isfinite(f_in) and math.isfinite(f_out)):
+                    raise ValueError("Valor flotante no finito")
                 clips.append(Clip(
                     media=clip_media,
                     source_in=c["source_in"],
@@ -958,9 +993,9 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
                     name=str(c.get("name") or ""),
                     pitch_semitones=int(c.get("pitch_semitones") or 0),
                     link_group=c.get("link_group"),
-                    volume=float(1.0 if c.get("volume") is None else c.get("volume")),
-                    fade_in=float(c.get("fade_in") or 0.0),
-                    fade_out=float(c.get("fade_out") or 0.0),
+                    volume=vol,
+                    fade_in=f_in,
+                    fade_out=f_out,
                 ))
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError("El archivo de proyecto contiene un clip dañado.") from exc
