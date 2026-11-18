@@ -141,10 +141,15 @@ class SimpleEditorPanel(tk.Frame):
         self.volume_var = tk.IntVar(value=100)
         self.fade_in_var = tk.DoubleVar(value=0.0)
         self.fade_out_var = tk.DoubleVar(value=0.0)
+        self._destroyed = False
+        self._shortcut_handlers = {}
         self._build_ui()
         self._poll_after_id = self.after(60, self._poll_queue)
 
     def destroy(self):
+        self._destroyed = True
+        if hasattr(self, "_shortcut_handlers"):
+            self._shortcut_handlers.clear()
         for timer in ("_poll_after_id", "_frame_after_id"):
             after_id = getattr(self, timer, None)
             if after_id:
@@ -246,8 +251,21 @@ class SimpleEditorPanel(tk.Frame):
             "<Home>": (lambda: self._move_playhead(0.0), False),
             "<End>": (lambda: self._move_playhead(self.project.duration()), False),
         }
-        for sequence, (handler, no_mod) in shortcuts.items():
-            self.bind_all(sequence, lambda event, handler=handler, no_mod=no_mod: self._shortcut(event, handler, no_mod), add="+")
+        self._shortcut_handlers = shortcuts
+        panel_ref = weakref.ref(self)
+
+        def dispatch_shortcut(event, seq):
+            panel = panel_ref()
+            if panel is None or getattr(panel, "_destroyed", False):
+                return None
+            entry = getattr(panel, "_shortcut_handlers", {}).get(seq)
+            if entry is None:
+                return None
+            handler, no_mod = entry
+            return panel._shortcut(event, handler, no_mod)
+
+        for sequence in shortcuts:
+            self.bind_all(sequence, lambda event, seq=sequence: dispatch_shortcut(event, seq), add="+")
 
         workspace = tk.PanedWindow(self, orient="horizontal", bg=BG, sashwidth=5, bd=0)
         workspace.pack(fill="both", expand=True, padx=10, pady=(8, 4))
@@ -741,6 +759,7 @@ class SimpleEditorPanel(tk.Frame):
         self.status.configure(text=f"Hueco de {format_editor_time(shift)} cerrado en {track.name}.", fg=GREEN)
 
     def _timeline_context_menu(self, event):
+        self._commit_inspector_edits()
         x = self.timeline.canvasx(event.x)
         y = self.timeline.canvasy(event.y)
         track = self._track_at_y(y)
@@ -750,9 +769,13 @@ class SimpleEditorPanel(tk.Frame):
         menu = tk.Menu(self, tearoff=0, bg=PANEL2, fg=TEXT, activebackground=BLUE, activeforeground="#ffffff")
         hit = self._clip_at(x, y)
         if hit:
-            _track, clip = hit
+            hit_track, clip = hit
+            self.project.selected_track_index = self.project.tracks.index(hit_track)
             self.selected_clip = clip
             self.selected_media = clip.media
+            self._sync_selection_marks(clip)
+            self.keep_audio.set(self._effective_clip_audio(clip))
+            self._refresh_tracks()
             self._update_inspector()
             self.redraw_timeline()
             menu.add_command(label="Dividir en el cabezal    S", command=self.split_at_playhead)
@@ -1678,9 +1701,10 @@ class SimpleEditorPanel(tk.Frame):
         duration = max(0.1, end - start)
         linked_audio = self._linked_audio_source(clip_ref)
         audio_clip = linked_audio or clip_ref
+        own_audio_on = clip_ref.use_source_audio if clip_ref is not None else self.keep_audio.get()
         play_audio = bool(
             (linked_audio is not None)
-            or (media.has_audio and self.keep_audio.get() and not track_muted)
+            or (media.has_audio and own_audio_on and not track_muted)
         )
         audio_path = linked_audio.media.path if linked_audio else media.path
         pitch_filter = build_pitch_filter(getattr(audio_clip, "pitch_semitones", 0))
@@ -1835,10 +1859,19 @@ class SimpleEditorPanel(tk.Frame):
         if af_parts:
             command += ["-af", ",".join(af_parts)]
         command += [media.path]
-        audio_process = subprocess.Popen(
-            command,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        try:
+            audio_process = subprocess.Popen(
+                command,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as exc:
+            self.playing = False
+            self._playback_from_timeline = False
+            self.playback_started_at = None
+            self.audio_process = None
+            self.play_btn.configure(text="▶")
+            self.status.configure(text=f"Previsualización de audio: {exc}", fg=RED)
+            return
         self.audio_process = audio_process
 
         def wait_audio(panel_ref=weakref.ref(self), ui_q=self.ui_queue, proc=audio_process, token=token):
@@ -2305,6 +2338,8 @@ class SimpleEditorPanel(tk.Frame):
             ]
             wanted = other.timeline_start + delta
             if wanted < -1e-6 or abs(avoid_clip_overlap(wanted, other.duration, ranges) - wanted) > 1e-6:
+                self.snap_target = None
+                self.snap_label = ""
                 self.status.configure(text="El audio vinculado chocaría con otro clip; desvincúlalo para moverlo por separado.", fg=YELLOW)
                 return
         if target_track is not track:

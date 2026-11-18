@@ -1087,6 +1087,66 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_muted_linked_audio_does_not_leak_source_and_audio_popen_error_resets_playing(self):
+        root = tk.Tk()
+        root.geometry("900x700+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_vid, \
+                 tempfile.NamedTemporaryFile(suffix=".mp3") as tmp_aud:
+                v_media = MediaInfo(path=tmp_vid.name, duration=5.0, has_video=True, has_audio=True, width=640, height=360, fps=30.0)
+                a_media = audio_media_from_video(v_media)
+                v_clip = Clip(v_media, source_out=5.0, timeline_start=0.0, use_source_audio=False, link_group="g1")
+                a_clip = Clip(a_media, source_out=5.0, timeline_start=0.0, link_group="g1")
+                panel.project.tracks[0].clips = [v_clip]
+                panel.project.tracks[1].clips = [a_clip]
+                panel.project.tracks[1].muted = True
+                panel.selected_clip = v_clip
+                panel.selected_media = v_media
+                panel.keep_audio.set(panel._effective_clip_audio(v_clip))
+                self.assertTrue(panel.keep_audio.get())
+
+                spawned_cmds = []
+                fake_proc = mock.MagicMock()
+                fake_proc.poll.return_value = 0
+                fake_proc.wait.return_value = 0
+                fake_proc.stdout = mock.MagicMock()
+                fake_proc.stderr = mock.MagicMock()
+
+                def fake_popen(cmd, **_kwargs):
+                    spawned_cmds.append(cmd)
+                    return fake_proc
+
+                with mock.patch("simple_editor_panel.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+                     mock.patch("simple_editor_panel.subprocess.Popen", side_effect=fake_popen):
+                    panel.toggle_play()
+                    import time
+                    deadline = time.monotonic() + 2.0
+                    while not spawned_cmds and time.monotonic() < deadline:
+                        root.update()
+                        time.sleep(0.01)
+                self.assertEqual(len(spawned_cmds), 1)
+                self.assertEqual(spawned_cmds[0][0], "ffmpeg")
+                panel.stop_playback()
+
+                # Si _play_audio_only falla al lanzar ffplay, playing vuelve a False
+                a_only = MediaInfo(path=tmp_aud.name, duration=5.0, has_video=False, has_audio=True)
+                with mock.patch("simple_editor_panel.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+                     mock.patch("simple_editor_panel.subprocess.Popen", side_effect=OSError("missing ffplay")):
+                    panel._play_audio_only(a_only, 0.0, 3.0)
+                self.assertFalse(panel.playing)
+                self.assertEqual(panel.play_btn.cget("text"), "▶")
+        finally:
+            panel.destroy()
+            self.assertTrue(panel._destroyed)
+            self.assertEqual(panel._shortcut_handlers, {})
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

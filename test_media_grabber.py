@@ -459,6 +459,19 @@ class PlaylistHandlingTests(unittest.TestCase):
         self.assertTrue(any(e.get("type") == "log" and "MP3" in e.get("text", "") for e in events))
         self.assertTrue(any(e.get("type") == "complete" and e.get("err_count") == 1 for e in events))
 
+    def test_center_window_clamps_negative_offsets_on_small_screen(self):
+        import types
+        import media_grabber
+        geometries = []
+        fake_root = types.SimpleNamespace(
+            winfo_screenwidth=lambda: 800,
+            winfo_screenheight=lambda: 540,
+            geometry=lambda spec: geometries.append(spec),
+        )
+        dummy = types.SimpleNamespace(root=fake_root)
+        media_grabber.MediaGrabberApp.center_window(dummy, 1100, 720)
+        self.assertEqual(geometries[-1], "760x480+20+30")
+
 
 if __name__ == "__main__":
     unittest.main()

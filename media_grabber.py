@@ -439,6 +439,7 @@ def fetch_playlist_entries(url: str):
         "extract_flat": True,
         "skip_download": True,
         "ignoreerrors": True,
+        "socket_timeout": 15,
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -828,7 +829,16 @@ def select_playlist_entries(parent, url):
         scrollbar.grid(row=0, column=1, sticky="ns")
         inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(inner_id, width=e.width))
-        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+
+        def scroll_playlist(e, step=None):
+            if step is None:
+                step = -1 if e.delta > 0 else (1 if e.delta < 0 else 0)
+            if step:
+                canvas.yview_scroll(step, "units")
+
+        canvas.bind("<MouseWheel>", scroll_playlist)
+        canvas.bind("<Button-4>", lambda e: scroll_playlist(e, -1))
+        canvas.bind("<Button-5>", lambda e: scroll_playlist(e, 1))
 
         selections = []
         for index, entry in enumerate(entries, 1):
@@ -993,9 +1003,11 @@ class MediaGrabberApp:
     def center_window(self, width, height):
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
-        x = (screen_width - width) // 2
-        y = (screen_height - height) // 2
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        actual_w = min(width, max(650, screen_width - 40))
+        actual_h = min(height, max(480, screen_height - 60))
+        x = max(0, (screen_width - actual_w) // 2)
+        y = max(0, (screen_height - actual_h) // 2)
+        self.root.geometry(f"{actual_w}x{actual_h}+{x}+{y}")
 
     def setup_ui(self):
         self.notebook = ttk.Notebook(self.root)
@@ -1035,19 +1047,30 @@ class MediaGrabberApp:
             )
             update_scroll_region()
 
-        def scroll_body(event):
-            if event.widget.winfo_toplevel() != self.root:
+        def scroll_body(event, step=None):
+            widget = getattr(event, "widget", None)
+            if not widget or not hasattr(widget, "winfo_toplevel"):
                 return
-            if self.notebook.select() != str(self.download_tab):
+            try:
+                if widget.winfo_toplevel() != self.root:
+                    return
+                if self.notebook.select() != str(self.download_tab):
+                    return
+            except tk.TclError:
                 return
-            if event.widget in (self.terminal, self.url_input):
+            if widget in (self.terminal, self.url_input):
                 return
-            if self.body_canvas.bbox("all"):
-                self.body_canvas.yview_scroll(int(-event.delta / 120), "units")
+            if step is None:
+                delta = getattr(event, "delta", 0)
+                step = -1 if delta > 0 else (1 if delta < 0 else 0)
+            if step and self.body_canvas.bbox("all"):
+                self.body_canvas.yview_scroll(step, "units")
 
         self.main_container.bind("<Configure>", update_scroll_region)
         self.body_canvas.bind("<Configure>", resize_body)
         self.body_canvas.bind_all("<MouseWheel>", scroll_body)
+        self.body_canvas.bind_all("<Button-4>", lambda event: scroll_body(event, -1))
+        self.body_canvas.bind_all("<Button-5>", lambda event: scroll_body(event, 1))
 
         # 1. Header Frame
         header = tk.Frame(self.main_container, bg="#1a1a1a")
@@ -1346,7 +1369,7 @@ class MediaGrabberApp:
 
         def worker():
             try:
-                with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True}) as ydl:
+                with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True, "socket_timeout": 15}) as ydl:
                     info = ydl.extract_info(url, download=False)
                 title = (info or {}).get("title") or ""
             except Exception:
