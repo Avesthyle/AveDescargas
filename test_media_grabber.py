@@ -472,6 +472,121 @@ class PlaylistHandlingTests(unittest.TestCase):
         media_grabber.MediaGrabberApp.center_window(dummy, 1100, 720)
         self.assertEqual(geometries[-1], "760x480+20+30")
 
+    def test_download_folder_error_double_start_lock_cancel_race_and_playlist_scroll(self):
+        import types
+        import tkinter as tk
+        from unittest import mock
+        import media_grabber
+
+        class DummyVar:
+            def __init__(self, value=""):
+                self.value = value
+            def get(self):
+                return self.value
+            def set(self, value):
+                self.value = value
+
+        class DummyBtn:
+            def __init__(self):
+                self.state = "normal"
+            def configure(self, **kw):
+                if "state" in kw:
+                    self.state = kw["state"]
+
+        prev_downloading = media_grabber.IS_DOWNLOADING
+        prev_cancel = media_grabber.CANCEL_REQUESTED
+        try:
+            media_grabber.IS_DOWNLOADING = False
+            media_grabber.CANCEL_REQUESTED = False
+            btn_dl = DummyBtn()
+            btn_cancel = DummyBtn()
+            lbl_status = types.SimpleNamespace(configure=lambda **_kw: None, text="")
+            errors = []
+            dummy = types.SimpleNamespace(
+                url_input=types.SimpleNamespace(get=lambda *_a: "https://example.com/v\n"),
+                clip_enabled_var=DummyVar(False),
+                resolve_download_targets=lambda urls: [{"url": u, "allow_playlist": False} for u in urls],
+                folder_var=DummyVar("/ruta/inaccesible"),
+                settings={},
+                custom_name_var=DummyVar(""),
+                fmt_var=DummyVar("mp4"),
+                quality_var=DummyVar("1080p (Full HD)"),
+                video_audio_var=DummyVar("with_audio"),
+                progress_bar={"value": 0},
+                lbl_status=lbl_status,
+                clear_log=lambda: None,
+                log_to_terminal=lambda *_a: None,
+                btn_download=btn_dl,
+                btn_cancel=btn_cancel,
+            )
+            with mock.patch("media_grabber.os.makedirs", side_effect=OSError("perm denied")), \
+                 mock.patch("media_grabber.messagebox.showerror", side_effect=lambda *a: errors.append(a)), \
+                 mock.patch("media_grabber.threading.Thread") as thread_mock:
+                media_grabber.MediaGrabberApp.on_download(dummy)
+            self.assertEqual(len(errors), 1)
+            thread_mock.assert_not_called()
+            self.assertFalse(media_grabber.IS_DOWNLOADING)
+
+            # Con carpeta válida, on_download bloquea IS_DOWNLOADING y deshabilita botón antes de lanzar el hilo
+            with tempfile.TemporaryDirectory() as folder:
+                dummy.folder_var.set(folder)
+                started_flags = []
+
+                class FakeThread:
+                    def __init__(self, **_kw):
+                        pass
+                    def start(self):
+                        started_flags.append((media_grabber.IS_DOWNLOADING, btn_dl.state))
+
+                with mock.patch("media_grabber.save_settings", side_effect=OSError("read only")), \
+                     mock.patch("media_grabber.threading.Thread", FakeThread):
+                    media_grabber.MediaGrabberApp.on_download(dummy)
+                self.assertEqual(started_flags, [(True, "disabled")])
+
+            # Si la descarga terminó mientras el cuadro de confirmación estaba abierto, on_cancel no activa CANCEL_REQUESTED
+            def finish_while_asking(*_a):
+                media_grabber.IS_DOWNLOADING = False
+                return True
+
+            media_grabber.IS_DOWNLOADING = True
+            media_grabber.CANCEL_REQUESTED = False
+            with mock.patch("media_grabber.messagebox.askyesno", side_effect=finish_while_asking):
+                media_grabber.MediaGrabberApp.on_cancel(dummy)
+            self.assertFalse(media_grabber.CANCEL_REQUESTED)
+
+            # select_playlist_entries enlaza rueda del ratón en las casillas Checkbutton
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                checked_bindings = []
+                wheel_bindings = []
+
+                def close_when_populated():
+                    if checked_bindings and checked_bindings[0].bind("<Button-4>"):
+                        cb = checked_bindings[0]
+                        wheel_bindings.append((bool(cb.bind("<Button-4>")), bool(cb.bind("<MouseWheel>"))))
+                        cb.winfo_toplevel().destroy()
+                    else:
+                        root.after(30, close_when_populated)
+
+                root.after(50, close_when_populated)
+                orig_checkbutton = tk.Checkbutton
+
+                class SpyCheckbutton(orig_checkbutton):
+                    def __init__(self, master=None, **kw):
+                        super().__init__(master, **kw)
+                        checked_bindings.append(self)
+
+                with mock.patch("media_grabber.fetch_playlist_entries", return_value=[{"title": "Track 1", "url": "https://example.com/1"}]), \
+                     mock.patch("media_grabber.tk.Checkbutton", SpyCheckbutton):
+                    media_grabber.select_playlist_entries(root, "https://example.com/list")
+                self.assertEqual(wheel_bindings, [(True, True)])
+            finally:
+                root.destroy()
+        finally:
+            media_grabber.IS_DOWNLOADING = prev_downloading
+            media_grabber.CANCEL_REQUESTED = prev_cancel
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -832,19 +832,27 @@ def select_playlist_entries(parent, url):
 
         def scroll_playlist(e, step=None):
             if step is None:
-                step = -1 if e.delta > 0 else (1 if e.delta < 0 else 0)
+                delta = getattr(e, "delta", 0)
+                step = -1 if delta > 0 else (1 if delta < 0 else 0)
             if step:
-                canvas.yview_scroll(step, "units")
+                try:
+                    canvas.yview_scroll(step, "units")
+                except tk.TclError:
+                    pass
 
-        canvas.bind("<MouseWheel>", scroll_playlist)
-        canvas.bind("<Button-4>", lambda e: scroll_playlist(e, -1))
-        canvas.bind("<Button-5>", lambda e: scroll_playlist(e, 1))
+        def bind_scroll(widget):
+            widget.bind("<MouseWheel>", scroll_playlist)
+            widget.bind("<Button-4>", lambda e: scroll_playlist(e, -1))
+            widget.bind("<Button-5>", lambda e: scroll_playlist(e, 1))
+
+        bind_scroll(canvas)
+        bind_scroll(inner)
 
         selections = []
         for index, entry in enumerate(entries, 1):
             selected = tk.BooleanVar(value=True)
             selections.append((selected, entry["url"]))
-            tk.Checkbutton(
+            cb = tk.Checkbutton(
                 inner,
                 text=f"{index}. {entry['title']}",
                 variable=selected,
@@ -857,7 +865,9 @@ def select_playlist_entries(parent, url):
                 anchor="w",
                 justify="left",
                 wraplength=540,
-            ).pack(fill="x", padx=10, pady=3)
+            )
+            cb.pack(fill="x", padx=10, pady=3)
+            bind_scroll(cb)
 
         controls = tk.Frame(dialog, bg="#1a1a1a")
         controls.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 14))
@@ -1344,7 +1354,10 @@ class MediaGrabberApp:
         if f:
             self.folder_var.set(f)
             self.settings["download_folder"] = f
-            save_settings(SETTINGS_PATH, self.settings)
+            try:
+                save_settings(SETTINGS_PATH, self.settings)
+            except OSError:
+                pass
 
     def load_title_async(self, force=False):
         urls = [u.strip() for u in self.url_input.get("1.0", tk.END).splitlines() if u.strip()]
@@ -1425,6 +1438,7 @@ class MediaGrabberApp:
         return targets
 
     def on_download(self):
+        global IS_DOWNLOADING, CANCEL_REQUESTED
         if IS_DOWNLOADING:
             return
 
@@ -1475,6 +1489,8 @@ class MediaGrabberApp:
         if download_targets is None:
             self.lbl_status.configure(text="Descarga cancelada.", fg="#F9C846")
             return
+        if IS_DOWNLOADING:
+            return
         if clip_range:
             download_targets = apply_clip_to_targets(
                 download_targets, clip_range[0], clip_range[1]
@@ -1484,9 +1500,16 @@ class MediaGrabberApp:
         if not output_dir:
             output_dir = DEFAULT_FOLDER
             self.folder_var.set(output_dir)
-        os.makedirs(output_dir, exist_ok=True)
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror("Carpeta no válida", f"No se pudo acceder o crear la carpeta de destino:\n\n{output_dir}\n\n{exc}")
+            return
         self.settings["download_folder"] = output_dir
-        save_settings(SETTINGS_PATH, self.settings)
+        try:
+            save_settings(SETTINGS_PATH, self.settings)
+        except OSError:
+            pass
 
         if len(download_targets) == 1:
             raw_custom = self.custom_name_var.get().strip()
@@ -1527,16 +1550,28 @@ class MediaGrabberApp:
         self.log_to_terminal(f"🔗 Total elementos preparados: {len(download_targets)}\n", "normal")
 
         # Spawn download background thread
-        t = threading.Thread(
-            target=run_downloads_thread,
-            args=(download_targets, output_dir, fmt, video_quality, include_audio),
-            daemon=True,
-        )
-        t.start()
+        IS_DOWNLOADING = True
+        CANCEL_REQUESTED = False
+        self.btn_download.configure(state="disabled")
+        try:
+            t = threading.Thread(
+                target=run_downloads_thread,
+                args=(download_targets, output_dir, fmt, video_quality, include_audio),
+                daemon=True,
+            )
+            t.start()
+        except Exception:
+            IS_DOWNLOADING = False
+            self.btn_download.configure(state="normal")
+            raise
 
     def on_cancel(self):
         global CANCEL_REQUESTED
+        if not IS_DOWNLOADING:
+            return
         if messagebox.askyesno("Confirmar Cancelación", "¿Estás seguro de que quieres cancelar la descarga actual?"):
+            if not IS_DOWNLOADING:
+                return
             CANCEL_REQUESTED = True
             self.btn_cancel.configure(state="disabled")
             self.lbl_status.configure(text="Cancelando descarga...", fg="#F9C846")
