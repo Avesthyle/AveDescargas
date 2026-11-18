@@ -479,6 +479,17 @@ class ExportPlanTests(unittest.TestCase):
         self.assertEqual(playback_range(2.5, 2.0, 6.0, 20.0), (2.5, 6.0))
         self.assertEqual(playback_range(5.0, 0.0, 0.0, 20.0), (5.0, 20.0))
 
+    def test_format_editor_time_carries_rounded_seconds_and_waveform_segment_tail(self):
+        from media_editor import format_editor_time
+
+        self.assertEqual(format_editor_time(59.999), "01:00.00")
+        self.assertEqual(format_editor_time(3599.999), "01:00:00.00")
+        self.assertEqual(format_editor_time(float("nan")), "00:00.00")
+        self.assertEqual(format_editor_time(float("inf")), "00:00.00")
+        segment = waveform_segment([0.1, 0.2, 0.3], 2.99, 3.0, 3.0, sample_count=8)
+        self.assertEqual(len(segment), 8)
+        self.assertEqual(segment[-1], 0.3)
+
 
 if __name__ == "__main__":
     unittest.main()

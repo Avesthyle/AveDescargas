@@ -779,6 +779,20 @@ class PlaylistHandlingTests(unittest.TestCase):
             media_grabber.run_downloads_thread([], ".", "mp4", "1080p (Full HD)")
         self.assertEqual(observed_flags, [False])
 
+    def test_save_settings_relative_path(self):
+        import os
+        import tempfile
+        import media_grabber
+
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                os.chdir(tmpdir)
+                media_grabber.save_settings("settings.json", {"ok": True})
+                self.assertEqual(media_grabber.load_settings("settings.json"), {"ok": True})
+            finally:
+                os.chdir(cwd)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -77,10 +77,16 @@ def parse_editor_time(value) -> float:
 
 
 def format_editor_time(seconds: float) -> str:
-    seconds = max(0.0, float(seconds))
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = seconds % 60
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        value = 0.0
+    if not math.isfinite(value) or value <= 0.0:
+        value = 0.0
+    total_cs = int(round(value * 100))
+    hours, rem_cs = divmod(total_cs, 360000)
+    minutes, rem_cs = divmod(rem_cs, 6000)
+    secs = rem_cs / 100.0
     if hours:
         return f"{hours:02d}:{minutes:02d}:{secs:05.2f}"
     return f"{minutes:02d}:{secs:05.2f}"
@@ -452,9 +458,10 @@ def waveform_segment(samples: list[float], source_in: float, source_out: float, 
     """Map a source-time range to waveform samples without stretching its time scale."""
     if not samples or media_duration <= 0 or source_out <= source_in:
         return [0.0] * max(1, int(sample_count))
-    start = max(0, min(len(samples), int(round(float(source_in) / media_duration * len(samples)))))
-    end = max(start + 1, min(len(samples), int(round(float(source_out) / media_duration * len(samples)))))
-    selected = samples[start:end]
+    total = len(samples)
+    start = max(0, min(total - 1, int(round(float(source_in) / media_duration * total))))
+    end = max(start + 1, min(total, int(round(float(source_out) / media_duration * total))))
+    selected = samples[start:end] or [samples[start]]
     count = max(1, int(sample_count))
     if len(selected) <= count:
         return selected + [selected[-1]] * (count - len(selected))
