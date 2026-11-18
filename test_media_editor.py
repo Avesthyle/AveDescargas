@@ -248,6 +248,20 @@ class ExportPlanTests(unittest.TestCase):
         plan = build_export_plan(EditorProject([Track("V", "video", clips=[Clip(vfr, source_out=5)])]), "active", None, "salida.mp4")
         self.assertEqual(plan["fps"], 30.0)
 
+    def test_split_clip_clamps_fades_and_avoids_accumulating_suffixes(self):
+        clip = Clip(video_info("v.mp4", duration=10), source_out=10, name="clip · 1", fade_in=5.0, fade_out=4.0)
+        left, right = split_clip(clip, 2.0)
+        self.assertEqual(left.name, "clip · 1")
+        self.assertEqual(right.name, "clip · 2")
+        self.assertLessEqual(left.fade_in, left.duration + 1e-6)
+        self.assertEqual(right.fade_out, 4.0)
+
+    def test_build_export_plan_respects_use_source_audio_on_audio_track(self):
+        muted_audio = Clip(audio_info("a.mp3", duration=5), source_out=5, use_source_audio=False)
+        active_audio = Clip(audio_info("b.mp3", duration=5), source_out=5, timeline_start=5, use_source_audio=True)
+        plan = build_export_plan(EditorProject([Track("A1", "audio", clips=[muted_audio, active_audio])]), "active", None, "salida.mp3")
+        self.assertEqual(len(plan["audio_labels"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

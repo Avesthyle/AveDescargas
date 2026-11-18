@@ -654,8 +654,13 @@ class SimpleEditorPanel(tk.Frame):
         for linked in self._linked_clips(clip):
             linked_track = self._track_of(linked)
             if linked_track:
-                ripple_delete(linked_track.clips, linked)
-        ripple_delete(track.clips, clip)
+                linked_track.clips.remove(linked)
+        moved = [other for other in track.clips if other is not clip and other.timeline_start >= clip.timeline_end - 1e-6]
+        shift = ripple_delete(track.clips, clip)
+        if shift > 0:
+            for other in moved:
+                for linked in self._linked_clips(other):
+                    self._shift_linked_clip(linked, linked.timeline_start - shift)
         self.selected_clip = None
         self._apply_magnetic()
         self._update_inspector()
@@ -930,7 +935,9 @@ class SimpleEditorPanel(tk.Frame):
         self.fade_out_var.set(round(clip.fade_out, 2))
         self.pitch_var.set(self.pitch_options[clip.pitch_semitones + 12])
         self.pitch_status_var.set("Tono original: no detectado · ajuste relativo al original")
-        self.inspector_audio_btn.configure(text="Audio original ON" if clip.use_source_audio else "Audio original OFF")
+        linked_audio = [o for o in self._linked_clips(clip) if o.media.has_audio]
+        audio_on = linked_audio[0].use_source_audio if (clip.media.has_video and linked_audio and not clip.use_source_audio) else clip.use_source_audio
+        self.inspector_audio_btn.configure(text="Audio original ON" if audio_on else "Audio original OFF")
         self.unlink_btn.configure(text="Desvincular audio/vídeo" if clip.link_group else "Separar audio/vídeo")
 
     @staticmethod
@@ -1247,11 +1254,35 @@ class SimpleEditorPanel(tk.Frame):
 
         self._frame_after_id = self.after(40, launch)
 
+    def _next_clip_after(self, at_time):
+        """Devuelve el siguiente (track, clip) activo en o después de at_time."""
+        pos = float(at_time)
+        ordered = [t for t in reversed(self.project.tracks) if t.enabled and t.kind == "video"]
+        ordered += [t for t in reversed(self.project.tracks) if t.enabled and t.kind == "audio"]
+        best = None
+        for priority, track in enumerate(ordered):
+            for clip in track.clips:
+                if clip.timeline_end <= pos + 1e-6:
+                    continue
+                effective = max(pos, clip.timeline_start)
+                key = (round(effective, 6), priority)
+                if best is None or key < best[0]:
+                    best = (key, track, clip)
+        return (best[1], best[2]) if best else (None, None)
+
     def play_from_cursor(self):
         if self.playing:
             self.stop_playback()
             return
         track, clip = self._clip_at_playhead()
+        if not clip:
+            track, clip = self._next_clip_after(self.playhead_timeline)
+            if not clip and self.playhead_timeline > 0:
+                track, clip = self._next_clip_after(0.0)
+            if clip:
+                self.playhead_timeline = clip.timeline_start
+                self._update_timecode()
+                self.redraw_timeline()
         if not clip:
             self.status.configure(text="Coloca el cabezal sobre un clip de la línea de edición.", fg=YELLOW)
             return
@@ -1294,7 +1325,7 @@ class SimpleEditorPanel(tk.Frame):
             return None
         for other in self._linked_clips(clip_ref):
             other_track = self._track_of(other)
-            if other.media.has_audio and other_track and other_track.enabled and not other_track.muted:
+            if other.media.has_audio and other.use_source_audio and other_track and other_track.enabled and not other_track.muted:
                 return other
         return None
 
@@ -1307,14 +1338,16 @@ class SimpleEditorPanel(tk.Frame):
             return
         start, end = playback_range(self.cursor_time, self.mark_in, self.mark_out, media.duration, from_mark=from_mark)
         self.cursor_time = start
-        self.playback_started_at = time.monotonic()
+        self.playback_started_at = None
         self.playback_start_time = start
         self.playback_end_time = end
         track = self._playback_track or (self._track_of(self.selected_clip) if self.selected_clip else None)
         track_muted = bool(track and track.muted)
+        clip_ref = self.selected_clip if self.selected_clip and self.selected_clip.media is media else None
         if not media.has_video:
-            if track_muted:
-                self.status.configure(text="La pista está silenciada.", fg=YELLOW)
+            if track_muted or (clip_ref and not clip_ref.use_source_audio):
+                self._playback_from_timeline = False
+                self.status.configure(text="La pista o el clip está silenciado.", fg=YELLOW)
                 return
             self._play_audio_only(media, start, end)
             return
@@ -1323,7 +1356,6 @@ class SimpleEditorPanel(tk.Frame):
         self.frame_token += 1
         token = self.frame_token
         duration = max(0.1, end - start)
-        clip_ref = self.selected_clip if self.selected_clip and self.selected_clip.media is media else None
         linked_audio = self._linked_audio_source(clip_ref)
         audio_clip = linked_audio or clip_ref
         play_audio = bool(
@@ -1409,6 +1441,7 @@ class SimpleEditorPanel(tk.Frame):
             self.status.configure(text=f"Previsualización: {exc}", fg=RED)
             return
         self.playing = True
+        self.playback_started_at = time.monotonic()
         self.play_btn.configure(text="Ⅱ")
         self.frame_token += 1
         token = self.frame_token
@@ -1687,6 +1720,7 @@ class SimpleEditorPanel(tk.Frame):
         self.selected_media = clip.media
         self.mark_in = clip.source_in
         self.mark_out = clip.source_out
+        self.keep_audio.set(clip.use_source_audio)
         inside = clip.timeline_start <= self.playhead_timeline < clip.timeline_end
         offset = (self.playhead_timeline - clip.timeline_start) if inside else 0.0
         self.cursor_time = clamp_media_time(clip.source_in + offset, clip.media.duration)
@@ -1829,10 +1863,12 @@ class SimpleEditorPanel(tk.Frame):
             self.redraw_timeline()
             return
         if self.drag_clip:
+            is_trim = self.resize_side in ("left", "right")
             for clip in [self.drag_clip] + self._linked_clips(self.drag_clip):
-                clip.timeline_start = round(clip.timeline_start, 3)
-                clip.source_in = round(clip.source_in, 3)
-                clip.source_out = round(clip.source_out, 3)
+                clip.timeline_start = round(clip.timeline_start, 6)
+                if is_trim:
+                    clip.source_in = round(clip.source_in, 6)
+                    clip.source_out = round(clip.source_out, 6)
             self._apply_magnetic()
             self._commit_pending_snapshot()
             self.drag_clip = None
@@ -1844,12 +1880,23 @@ class SimpleEditorPanel(tk.Frame):
             self.redraw_timeline()
 
     def toggle_clip_audio(self):
-        if self.selected_clip and self.selected_clip.media.has_audio:
-            self._push_undo()
-            self.selected_clip.use_source_audio = not self.selected_clip.use_source_audio
-            state = "activado" if self.selected_clip.use_source_audio else "quitado"
-            self._update_inspector()
-            self.status.configure(text=f"Audio original del clip: {state}.", fg=YELLOW)
+        clip = self.selected_clip
+        if not clip or not clip.media.has_audio:
+            return
+        self._push_undo()
+        linked_audio = [o for o in self._linked_clips(clip) if o.media.has_audio] if clip.media.has_video else []
+        if linked_audio and not clip.use_source_audio:
+            new_state = not linked_audio[0].use_source_audio
+            for other in linked_audio:
+                other.use_source_audio = new_state
+        else:
+            clip.use_source_audio = not clip.use_source_audio
+            new_state = clip.use_source_audio
+        self.keep_audio.set(clip.use_source_audio)
+        state = "activado" if new_state else "quitado"
+        self._update_inspector()
+        self.redraw_timeline()
+        self.status.configure(text=f"Audio original del clip: {state}.", fg=YELLOW)
 
     def delete_clip(self):
         if self.playing:
@@ -1877,6 +1924,9 @@ class SimpleEditorPanel(tk.Frame):
             self.status.configure(text="Ya hay una exportación en curso.", fg=YELLOW)
             return
         tracks = self.project.export_tracks(self._mode_key())
+        if not any(track.clips for track in tracks):
+            messagebox.showerror("No se puede exportar", "No hay clips activos para exportar.")
+            return
         has_video = any(clip.media.has_video for track in tracks for clip in track.clips)
         default = ".mp4" if has_video else ".mp3"
         path = filedialog.asksaveasfilename(
@@ -1941,14 +1991,10 @@ class SimpleEditorPanel(tk.Frame):
                 self.playback_started_at = None
                 self.play_btn.configure(text="▶")
                 if was_timeline and prev_clip is not None:
-                    next_pos = prev_clip.timeline_end + 0.01
-                    _nt, next_clip = self._clip_at_playhead(next_pos)
+                    next_pos = prev_clip.timeline_end + 0.001
+                    _nt, next_clip = self._next_clip_after(next_pos)
                     if next_clip and next_clip is not prev_clip and next_clip.timeline_end > next_pos:
-                        self.playhead_timeline = (
-                            max(next_pos, next_clip.timeline_start)
-                            if next_clip.timeline_start < prev_clip.timeline_end - 1e-6
-                            else next_clip.timeline_start
-                        )
+                        self.playhead_timeline = max(prev_clip.timeline_end, next_clip.timeline_start)
                         self.play_from_cursor()
                     else:
                         self._playback_from_timeline = False

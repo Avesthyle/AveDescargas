@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 import json
 import os
 import pathlib
+import re
 import shutil
 import struct
 import subprocess
@@ -349,13 +350,23 @@ def split_clip(clip: Clip, timeline_time: float) -> Optional[tuple[Clip, Clip]]:
     if cut >= clip.timeline_end - MIN_CLIP_DURATION:
         return None
     source_cut = clip.source_in + (cut - clip.timeline_start)
-    left = replace(clip, source_out=source_cut, name=f"{clip.name} · 1", fade_out=0.0)
+    base_name = re.sub(r"\s*·\s*\d+$", "", clip.name).strip() or clip.name
+    left_fade_in, _ = clamp_fades(clip.fade_in, 0.0, source_cut - clip.source_in)
+    _, right_fade_out = clamp_fades(0.0, clip.fade_out, clip.source_out - source_cut)
+    left = replace(
+        clip,
+        source_out=source_cut,
+        name=f"{base_name} · 1",
+        fade_in=left_fade_in,
+        fade_out=0.0,
+    )
     right = replace(
         clip,
         source_in=source_cut,
         timeline_start=cut,
-        name=f"{clip.name} · 2",
+        name=f"{base_name} · 2",
         fade_in=0.0,
+        fade_out=right_fade_out,
     )
     return left, right
 
@@ -643,7 +654,7 @@ def build_export_plan(
         include = (
             clip.media.has_audio
             and not track.muted
-            and (track.kind == "audio" or clip.use_source_audio)
+            and clip.use_source_audio
         )
         if not include:
             continue
@@ -738,7 +749,6 @@ def build_export_plan(
 
 def parse_ffmpeg_time(line: str) -> Optional[float]:
     """Extrae el tiempo en segundos de una línea de progreso de FFmpeg (time=HH:MM:SS.xx)."""
-    import re
     match = re.search(r"time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)", line or "")
     if not match:
         return None

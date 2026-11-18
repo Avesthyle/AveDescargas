@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 try:
     import tkinter as tk
@@ -19,7 +20,7 @@ except Exception:  # pragma: no cover - depende del entorno
     HAS_DISPLAY = False
 
 if HAS_DISPLAY:
-    from media_editor import Clip, MediaInfo, Track, build_export_plan, probe_media, run_export
+    from media_editor import Clip, MediaInfo, Track, audio_media_from_video, build_export_plan, probe_media, run_export
     from simple_editor_panel import LABEL_WIDTH, SimpleEditorPanel
 
 BUTTON1 = 0x0100
@@ -468,6 +469,88 @@ class EditorEndToEndTests(unittest.TestCase):
             plan = build_export_plan(panel.project, "active", None, output)
             run_export(plan)
             self.assertAlmostEqual(probe_media(output).duration, 8.0, delta=0.3)
+        finally:
+            panel.destroy()
+            root.destroy()
+
+    def test_ripple_delete_keeps_subsequent_linked_audio_synced(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            v_track = panel.project.tracks[0]
+            a_track = panel.project.tracks[1]
+            v_media = MediaInfo(path="v.mp4", duration=10.0, has_video=True, has_audio=True, width=320, height=180, fps=30.0)
+            a_media = audio_media_from_video(v_media)
+            c1 = Clip(v_media, source_out=3.0, timeline_start=0.0, name="c1")
+            c2 = Clip(v_media, source_out=4.0, timeline_start=3.0, use_source_audio=False, link_group="g2", name="c2")
+            c2_a = Clip(a_media, source_out=4.0, timeline_start=3.0, link_group="g2", name="a2")
+            music = Clip(MediaInfo(path="m.mp3", duration=5.0, has_video=False, has_audio=True), source_out=5.0, timeline_start=8.0, name="m")
+            v_track.clips = [c1, c2]
+            a_track.clips = [c2_a, music]
+            panel.selected_clip = c1
+            panel.ripple_delete_clip()
+            self.assertAlmostEqual(c2.timeline_start, 0.0, places=5)
+            self.assertAlmostEqual(c2_a.timeline_start, 0.0, places=5)
+            self.assertAlmostEqual(music.timeline_start, 8.0, places=5)
+        finally:
+            panel.destroy()
+            root.destroy()
+
+    def test_toggle_clip_audio_on_separated_video_toggles_linked_audio(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            v_track = panel.project.tracks[0]
+            a_track = panel.project.tracks[1]
+            v_media = MediaInfo(path="v.mp4", duration=10.0, has_video=True, has_audio=True, width=320, height=180, fps=30.0)
+            a_media = audio_media_from_video(v_media)
+            v_clip = Clip(v_media, source_out=4.0, timeline_start=0.0, use_source_audio=False, link_group="g1")
+            a_clip = Clip(a_media, source_out=4.0, timeline_start=0.0, link_group="g1")
+            v_track.clips = [v_clip]
+            a_track.clips = [a_clip]
+            panel.selected_clip = v_clip
+            panel.toggle_clip_audio()
+            self.assertFalse(v_clip.use_source_audio)
+            self.assertFalse(a_clip.use_source_audio)
+            panel.toggle_clip_audio()
+            self.assertFalse(v_clip.use_source_audio)
+            self.assertTrue(a_clip.use_source_audio)
+        finally:
+            panel.destroy()
+            root.destroy()
+
+    def test_next_clip_after_skips_gaps_and_release_preserves_precision(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            v_track = panel.project.tracks[0]
+            v_media = MediaInfo(path="v.mp4", duration=10.0, has_video=True, has_audio=False, width=320, height=180, fps=30.0)
+            c1 = Clip(v_media, source_in=0.123456, source_out=2.123456, timeline_start=0.0)
+            c2 = Clip(v_media, source_out=2.0, timeline_start=5.0)
+            v_track.clips = [c1, c2]
+            _t, found = panel._next_clip_after(2.5)
+            self.assertIs(found, c2)
+            panel.drag_clip = c1
+            panel.resize_side = None
+            panel._timeline_release(type("E", (), {})())
+            self.assertAlmostEqual(c1.source_in, 0.123456, places=6)
+        finally:
+            panel.destroy()
+            root.destroy()
+
+    def test_export_rejects_empty_timeline_before_file_dialog(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            with mock.patch("simple_editor_panel.filedialog.asksaveasfilename") as ask_mock, \
+                 mock.patch("simple_editor_panel.messagebox.showerror") as err_mock:
+                panel.export()
+            ask_mock.assert_not_called()
+            err_mock.assert_called_once()
         finally:
             panel.destroy()
             root.destroy()
