@@ -1632,6 +1632,62 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_delete_clamps_playhead_drop_updates_preview_and_fallback_unique_track_names(self):
+        from editor_panel import EditorPanel
+
+        root = tk.Tk()
+        root.geometry("1200x800+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                v_path = os.path.join(tmp, "v.mp4")
+                open(v_path, "wb").close()
+                v_media = MediaInfo(path=v_path, duration=10.0, has_video=True, has_audio=False, width=640, height=360, fps=30.0)
+                a_media = MediaInfo(path=os.path.join(tmp, "a.mp3"), duration=5.0, has_video=False, has_audio=True)
+
+                # 1. delete_clip y ripple_delete_clip limitan playhead_timeline a la nueva duración
+                clip = Clip(v_media, source_in=0.0, source_out=6.0, timeline_start=0.0)
+                panel.project.tracks[0].clips = [clip]
+                panel.selected_clip = clip
+                panel.playhead_timeline = 4.5
+                panel.delete_clip()
+                self.assertEqual(panel.playhead_timeline, 0.0)
+
+                clip2 = Clip(v_media, source_in=0.0, source_out=6.0, timeline_start=0.0)
+                panel.project.tracks[0].clips = [clip2]
+                panel.selected_clip = clip2
+                panel.playhead_timeline = 5.0
+                panel.ripple_delete_clip()
+                self.assertEqual(panel.playhead_timeline, 0.0)
+
+                # 2. _drop_library_media refresca el visor al soltar vídeo tras un clip de audio
+                panel.preview.configure(image="", text="♫  a.mp3")
+                panel.media_library = [v_media, a_media]
+                with mock.patch.object(panel, "request_frame") as req_frame:
+                    panel._drop_library_media(type("Drop", (), {"x": 140, "y": 40})(), media_list=[v_media])
+                    req_frame.assert_called_once_with(0.0)
+
+            # 3. EditorPanel.add_track no repite nombres al borrar la primera pista
+            fb_panel = EditorPanel(root)
+            try:
+                t1 = fb_panel.add_track("video")
+                t2 = fb_panel.add_track("video")
+                self.assertEqual([t1.name, t2.name], ["Vídeo 1", "Vídeo 2"])
+                fb_panel.project.selected_track_index = 0
+                fb_panel.delete_track()
+                t3 = fb_panel.add_track("video")
+                self.assertEqual(t3.name, "Vídeo 1")
+            finally:
+                fb_panel.destroy()
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

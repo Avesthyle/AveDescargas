@@ -749,6 +749,9 @@ class SimpleEditorPanel(tk.Frame):
                     self._shift_linked_clip(linked, linked.timeline_start - shift)
         self.selected_clip = None
         self._apply_magnetic()
+        total = self.project.duration()
+        if self.playhead_timeline > total:
+            self.playhead_timeline = total
         self._refresh_preview_at_playhead()
         self._update_inspector()
         self.redraw_timeline()
@@ -1362,6 +1365,7 @@ class SimpleEditorPanel(tk.Frame):
         self._refresh_tracks()
         self._update_inspector()
         self.redraw_timeline()
+        self._request_clip_or_missing_preview(last_clip, last_clip.source_in)
         if len(added) == 1:
             self.status.configure(text=f"Añadido: {pathlib.Path(last_clip.media.path).name}", fg=GREEN)
         else:
@@ -2540,6 +2544,9 @@ class SimpleEditorPanel(tk.Frame):
                 track.clips.remove(target)
         self.selected_clip = None
         self._apply_magnetic()
+        total = self.project.duration()
+        if self.playhead_timeline > total:
+            self.playhead_timeline = total
         self._refresh_preview_at_playhead()
         self._update_inspector()
         self.redraw_timeline()

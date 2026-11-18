@@ -24,6 +24,7 @@ from media_editor import (
     probe_media,
     run_export,
     split_clip as split_timeline_clip,
+    unique_track_name,
 )
 
 
@@ -195,8 +196,8 @@ class EditorPanel(tk.Frame):
         return self.project.selected_track()
 
     def add_track(self, kind, name=None):
-        count = sum(1 for track in self.project.tracks if track.kind == kind) + 1
-        track = Track(name or (f"Vídeo {count}" if kind == "video" else f"Audio {count}"), kind)
+        track_name = name or unique_track_name([track.name for track in self.project.tracks], kind)
+        track = Track(track_name, kind)
         self.project.tracks.append(track)
         self.project.selected_track_index = len(self.project.tracks) - 1
         self.refresh()
