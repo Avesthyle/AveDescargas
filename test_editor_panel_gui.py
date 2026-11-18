@@ -1786,6 +1786,75 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_ronda24_spinbox_split_restored_media_close_gap_and_seek_stops_play(self):
+        root = tk.Tk()
+        root.geometry("1200x800+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            # 1. split_at_playhead conserva el volumen editado en volume_spin sin pulsar Enter
+            vm = MediaInfo("v.mp4", 10.0, True, True, 640, 360, 30.0)
+            vc = Clip(vm, source_in=0.0, source_out=6.0, timeline_start=0.0)
+            panel.project.tracks[0].clips = [vc]
+            panel.selected_clip = vc
+            panel._update_inspector()
+            root.update()
+            panel.volume_spin.focus_force()
+            root.update()
+            panel.volume_spin.delete(0, "end")
+            panel.volume_spin.insert(0, "175")
+            panel.playhead_timeline = 3.0
+            panel.split_at_playhead()
+            self.assertAlmostEqual(panel.project.tracks[0].clips[0].volume, 1.75)
+            self.assertAlmostEqual(panel.project.tracks[0].clips[1].volume, 1.75)
+
+            # 2. _add_or_get_media actualiza etiqueta, duración y caché de onda cuando un ausente vuelve a disco
+            with tempfile.TemporaryDirectory() as tmp:
+                fp = os.path.join(tmp, "restored.mp3")
+                m_missing = MediaInfo(fp, 5.0, False, True)
+                panel.media_library = [m_missing]
+                panel.media_list.delete(0, "end")
+                panel.media_list.insert("end", "♫  restored.mp3   ·   00:05.00 (no encontrado)")
+                panel._missing_media_paths = {os.path.normcase(os.path.abspath(fp))}
+                panel.waveform_cache[fp] = []
+                open(fp, "wb").close()
+                with mock.patch("simple_editor_panel.probe_media", return_value=MediaInfo(fp, 8.0, False, True)):
+                    got = panel._add_or_get_media(fp)
+                self.assertEqual(got.duration, 8.0)
+                self.assertNotIn("no encontrado", panel.media_list.get(0))
+                self.assertFalse(panel._is_known_missing(got))
+                self.assertNotIn(fp, panel.waveform_cache)
+
+            # 3. close_gap_at protege vídeo vinculado bloqueado y limita playhead_timeline al encoger
+            am = audio_media_from_video(vm)
+            v1 = Clip(vm, 0.0, 3.0, 0.0)
+            v2 = Clip(vm, 0.0, 3.0, 3.0, use_source_audio=False, link_group="g1")
+            a2 = Clip(am, 0.0, 3.0, 3.0, link_group="g1")
+            panel.project.tracks[0].clips = [v1, v2]
+            panel.project.tracks[1].clips = [a2]
+            panel.close_gap_at(panel.project.tracks[1], 1.0)
+            self.assertEqual(len(panel.project.tracks), 2)
+            self.assertAlmostEqual(a2.timeline_start, 3.0)
+
+            panel.project.tracks[0].clips = []
+            panel.project.tracks[1].clips = [Clip(am, 0.0, 2.0, 5.0)]
+            panel.playhead_timeline = 6.5
+            panel.close_gap_at(panel.project.tracks[1], 1.0)
+            self.assertAlmostEqual(panel.project.duration(), 2.0)
+            self.assertAlmostEqual(panel.playhead_timeline, 2.0)
+
+            # 4. _move_playhead detiene reproducción activa
+            panel.playing = True
+            panel._move_playhead(0.0)
+            self.assertFalse(panel.playing)
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

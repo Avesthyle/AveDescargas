@@ -689,6 +689,9 @@ class SimpleEditorPanel(tk.Frame):
         self.redraw_timeline()
 
     def _move_playhead(self, seconds):
+        self._commit_inspector_edits()
+        if self.playing:
+            self.stop_playback()
         self._seek_at_time(seconds)
         self._ensure_playhead_visible()
 
@@ -706,6 +709,7 @@ class SimpleEditorPanel(tk.Frame):
 
     def split_at_playhead(self):
         """Divide en el cabezal el clip seleccionado (o los clips bajo el cabezal en la pista seleccionada)."""
+        self._commit_inspector_edits()
         if self.playing:
             self.stop_playback()
         time_point = self.playhead_timeline
@@ -776,19 +780,47 @@ class SimpleEditorPanel(tk.Frame):
         self.status.configure(text="Clip eliminado y hueco cerrado.", fg=GREEN)
 
     def close_gap_at(self, track, time_point):
+        if self.playing:
+            self.stop_playback()
         gap = find_gap(track.clips, time_point)
         if gap is None:
             self.status.configure(text="Ahí no hay ningún hueco que cerrar.", fg=YELLOW)
             return
-        self._push_undo()
-        _gap_start, gap_end = gap
+        gap_start, gap_end = gap
+        shift_preview = gap_end - gap_start
         moved = [clip for clip in track.clips if clip.timeline_start >= gap_end - 1e-6]
+        moved_linked = [linked for clip in moved for linked in self._linked_clips(clip)]
+        moved_ids = {id(item) for item in moved + moved_linked}
+        for linked in moved_linked:
+            linked_track = self._track_of(linked)
+            if not linked_track or linked_track.kind != "video":
+                continue
+            wanted = linked.timeline_start - shift_preview
+            blocked = any(
+                id(other) not in moved_ids
+                and other.link_group != linked.link_group
+                and other.timeline_start < wanted + linked.duration - 1e-6
+                and other.timeline_end > wanted + 1e-6
+                for other in linked_track.clips
+            )
+            if wanted < -1e-6 or blocked:
+                self.status.configure(
+                    text="El vídeo vinculado chocaría en su pista; desvincúlalo para cerrar este hueco.",
+                    fg=YELLOW,
+                )
+                return
+        self._push_undo()
         shift = close_gap(track.clips, time_point)
         if shift > 0:
             for clip in moved:
                 for linked in self._linked_clips(clip):
                     self._shift_linked_clip(linked, linked.timeline_start - shift)
+        self._apply_magnetic()
+        total = self.project.duration()
+        if self.playhead_timeline > total:
+            self.playhead_timeline = total
         self._refresh_preview_at_playhead()
+        self._update_inspector()
         self.redraw_timeline()
         self.status.configure(text=f"Hueco de {format_editor_time(shift)} cerrado en {track.name}.", fg=GREEN)
 
@@ -856,8 +888,24 @@ class SimpleEditorPanel(tk.Frame):
 
     def _add_or_get_media(self, path):
         key = os.path.normcase(os.path.abspath(path))
-        for existing in self.media_library:
+        missing_paths = getattr(self, "_missing_media_paths", set())
+        for idx, existing in enumerate(self.media_library):
             if os.path.normcase(os.path.abspath(existing.path)) == key:
+                if key in missing_paths and os.path.isfile(path):
+                    media = probe_media(path)
+                    missing_paths.discard(key)
+                    self.media_library[idx] = media
+                    self.waveform_cache.pop(existing.path, None)
+                    self.waveform_cache.pop(media.path, None)
+                    icon = "▶" if media.has_video else "♫"
+                    self.media_list.delete(idx)
+                    self.media_list.insert(idx, f"{icon}  {pathlib.Path(path).name}   ·   {format_editor_time(media.duration)}")
+                    for track in self.project.tracks:
+                        for clip in track.clips:
+                            if os.path.normcase(os.path.abspath(clip.media.path)) == key and clip.source_out <= media.duration + 0.05:
+                                clip.media = media if (clip.media.has_video or not media.has_video) else audio_media_from_video(media)
+                    self.redraw_timeline()
+                    return media
                 return existing
         media = probe_media(path)
         self.media_library.append(media)
@@ -1480,6 +1528,7 @@ class SimpleEditorPanel(tk.Frame):
             self.delete_clip()
 
     def trim_to_playhead(self, side):
+        self._commit_inspector_edits()
         if self.playing:
             self.stop_playback()
         clip = self.selected_clip
@@ -1706,6 +1755,7 @@ class SimpleEditorPanel(tk.Frame):
         return (best[1], best[2]) if best else (None, None)
 
     def play_from_cursor(self):
+        self._commit_inspector_edits()
         if self.playing:
             self.stop_playback()
             return
@@ -2025,6 +2075,7 @@ class SimpleEditorPanel(tk.Frame):
         self.cursor_time = max(clip.source_in, min(self.cursor_time, clip.source_out))
 
     def cut_selected_clip(self):
+        self._commit_inspector_edits()
         if self.playing:
             self.stop_playback()
         clip = self.selected_clip
