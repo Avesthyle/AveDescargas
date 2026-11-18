@@ -137,6 +137,7 @@ class SimpleEditorPanel(tk.Frame):
         self.exporting = False
         self.export_duration = 0.0
         self.timecode_var = tk.StringVar(value="00:00.00 / 00:00.00")
+        self.export_resolution = tk.StringVar(value="Auto")
         self.volume_var = tk.IntVar(value=100)
         self.fade_in_var = tk.DoubleVar(value=0.0)
         self.fade_out_var = tk.DoubleVar(value=0.0)
@@ -189,6 +190,11 @@ class SimpleEditorPanel(tk.Frame):
         tk.Label(toolbar, text="Editor", bg=PANEL, fg=TEXT, font=("Segoe UI", 15, "bold")).pack(side="left", padx=(0, 12))
         self.export_btn = self._button(toolbar, "Exportar", self.export, GREEN, side="right")
         ttk.Combobox(
+            toolbar, textvariable=self.export_resolution,
+            values=["Auto", "1080p", "720p", "9:16"],
+            state="readonly", width=7,
+        ).pack(side="right", padx=2)
+        ttk.Combobox(
             toolbar, textvariable=self.export_mode,
             values=["Todos los canales activos", "Solo el canal seleccionado"],
             state="readonly", width=22,
@@ -211,10 +217,12 @@ class SimpleEditorPanel(tk.Frame):
             "<KeyPress-C>": (lambda: self.set_tool("razor"), True),
             "<KeyPress-s>": (self.split_at_playhead, True),
             "<KeyPress-S>": (self.split_at_playhead, True),
+            "<bracketleft>": (lambda: self.trim_to_playhead("left"), True),
+            "<bracketright>": (lambda: self.trim_to_playhead("right"), True),
             "<space>": (self.play_from_cursor, False),
-            "<Delete>": (self.delete_clip, False),
+            "<Delete>": (self._delete_shortcut, False),
             "<Shift-Delete>": (self.ripple_delete_clip, False),
-            "<BackSpace>": (self.delete_clip, False),
+            "<BackSpace>": (self._delete_shortcut, False),
             "<Control-z>": (self.undo, False),
             "<Control-Z>": (self.redo, False),
             "<Control-y>": (self.redo, False),
@@ -256,6 +264,7 @@ class SimpleEditorPanel(tk.Frame):
         )
         self.media_list.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.media_list.bind("<<ListboxSelect>>", self._select_media)
+        self.media_list.bind("<Double-Button-1>", lambda _e: self._insert_selected_media())
         self.media_list.bind("<ButtonPress-1>", self._library_drag_start)
         self.media_list.bind("<B1-Motion>", self._library_drag_motion)
         self.media_list.bind("<ButtonRelease-1>", self._library_drag_release)
@@ -319,6 +328,7 @@ class SimpleEditorPanel(tk.Frame):
         self.play_btn = self._button(transport, "▶", self.play_from_cursor, BLUE, padx=4)
         self._button(transport, "▶|", lambda: self._step_frames(1), padx=2)
         self._button(transport, "⏭", lambda: self._move_playhead(self.project.duration()), padx=2)
+        self._button(transport, "📷", self.capture_frame, padx=2)
         tk.Label(transport, textvariable=self.timecode_var, bg=PANEL, fg=TEXT, font=("Consolas", 10, "bold")).pack(side="right")
 
         timeline_panel = tk.Frame(self, bg=PANEL)
@@ -980,7 +990,14 @@ class SimpleEditorPanel(tk.Frame):
         cloned = copy.deepcopy(clip)
         if clip.link_group and clip.media.has_audio and not clip.use_source_audio:
             linked_audio = [o for o in self._linked_clips(clip) if o.media.has_audio]
-            cloned.use_source_audio = linked_audio[0].use_source_audio if linked_audio else True
+            if linked_audio:
+                cloned.use_source_audio = linked_audio[0].use_source_audio
+                cloned.volume = linked_audio[0].volume
+                cloned.pitch_semitones = linked_audio[0].pitch_semitones
+                cloned.fade_in = min(cloned.duration, linked_audio[0].fade_in)
+                cloned.fade_out = min(cloned.duration, linked_audio[0].fade_out)
+            else:
+                cloned.use_source_audio = True
         cloned.link_group = None
         return cloned
 
@@ -1232,7 +1249,135 @@ class SimpleEditorPanel(tk.Frame):
         self.mark_in = 0.0
         self.mark_out = self.selected_media.duration
         self.keep_audio.set(self.selected_media.has_audio)
-        self.status.configure(text="Archivo cargado. Arrástralo a un canal inferior para editarlo.", fg=TEXT)
+        if self.selected_clip and self.selected_clip.media is not self.selected_media:
+            self.selected_clip = None
+            self._update_inspector()
+            self.redraw_timeline()
+        if self.selected_media.has_video and os.path.isfile(self.selected_media.path):
+            self.request_frame(0.0)
+        elif not self.selected_media.has_video:
+            self.preview_photo = None
+            self.preview.configure(image="", text=f"♫  {pathlib.Path(self.selected_media.path).name}")
+        self.status.configure(text="Doble clic o arrastra a un canal para añadirlo a la línea de tiempo.", fg=TEXT)
+
+    def _insert_selected_media(self):
+        selection = self.media_list.curselection()
+        if not selection:
+            return
+        media = self.media_library[selection[0]]
+        kind = "video" if media.has_video else "audio"
+        track = self.project.selected_track()
+        if not track or track.kind != kind:
+            track = next((t for t in self.project.tracks if t.kind == kind), None)
+        if not track:
+            track = self.add_track(kind, record_undo=False)
+        self._push_undo()
+        clip = Clip(media, timeline_start=self.playhead_timeline, name=pathlib.Path(media.path).stem)
+        ranges = [(other.timeline_start, other.timeline_end) for other in track.clips]
+        clip.timeline_start = round(avoid_clip_overlap(self.playhead_timeline, clip.duration, ranges), 6)
+        track.clips.append(clip)
+        self.selected_clip = clip
+        self.selected_media = media
+        self._sync_selection_marks(clip)
+        self.project.selected_track_index = self.project.tracks.index(track)
+        if track is self._main_track():
+            self._apply_magnetic()
+        self._refresh_tracks()
+        self._update_inspector()
+        self.redraw_timeline()
+        if media.has_video and os.path.isfile(media.path):
+            self.request_frame(clip.source_in)
+        self.status.configure(text=f"Añadido al timeline: {pathlib.Path(media.path).name}", fg=GREEN)
+
+    def remove_selected_library_media(self):
+        selection = self.media_list.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        media = self.media_library[index]
+        media_key = os.path.normcase(os.path.abspath(media.path))
+        in_use = any(
+            os.path.normcase(os.path.abspath(c.media.path)) == media_key
+            for t in self.project.tracks for c in t.clips
+        )
+        if in_use:
+            self.status.configure(text="No se puede quitar: este archivo tiene clips en la línea de tiempo.", fg=YELLOW)
+            return
+        self.media_library.pop(index)
+        self.media_list.delete(index)
+        if self.selected_media is media:
+            self.selected_media = None
+        self.status.configure(text=f"Quitado de la lista: {pathlib.Path(media.path).name}", fg=TEXT)
+
+    def _delete_shortcut(self):
+        try:
+            focus = self.focus_get()
+        except (KeyError, tk.TclError):
+            focus = None
+        if focus is self.media_list and self.media_list.curselection():
+            self.remove_selected_library_media()
+        else:
+            self.delete_clip()
+
+    def trim_to_playhead(self, side):
+        if self.playing:
+            self.stop_playback()
+        clip = self.selected_clip
+        track = self._track_of(clip) if clip else None
+        if not clip or not track:
+            self.status.configure(text="Selecciona un clip para recortarlo hasta el cabezal ([ / ]).", fg=YELLOW)
+            return
+        target = self.playhead_timeline
+        if side == "left":
+            if target <= clip.timeline_start + 1e-6 or target >= clip.timeline_end - MIN_CLIP_DURATION:
+                self.status.configure(text="Coloca el cabezal dentro del clip para recortar su inicio ([).", fg=YELLOW)
+                return
+            self._push_undo()
+            updated = resize_clip_left(clip, target)
+            self._replace_clip(track, clip, updated)
+            for other in self._linked_clips(updated):
+                self._replace_linked(other, resize_clip_left(other, updated.timeline_start))
+        else:
+            if target >= clip.timeline_end - 1e-6 or target <= clip.timeline_start + MIN_CLIP_DURATION:
+                self.status.configure(text="Coloca el cabezal dentro del clip para recortar su final (]).", fg=YELLOW)
+                return
+            self._push_undo()
+            updated = resize_clip_right(clip, target)
+            self._replace_clip(track, clip, updated)
+            for other in self._linked_clips(updated):
+                self._replace_linked(other, resize_clip_right(other, updated.timeline_end))
+        self.selected_clip = updated
+        self._sync_selection_marks(updated)
+        self._apply_magnetic()
+        self._update_inspector()
+        self.redraw_timeline()
+        self.status.configure(text=f"Clip recortado hasta {format_editor_time(target)}.", fg=GREEN)
+
+    def capture_frame(self):
+        media = self.selected_media
+        if not media or not media.has_video:
+            self.status.configure(text="Selecciona un vídeo para capturar un fotograma.", fg=YELLOW)
+            return
+        if not os.path.isfile(media.path):
+            self.status.configure(text=f"Archivo no encontrado: {os.path.basename(media.path)}", fg=RED)
+            return
+        default_name = f"{pathlib.Path(media.path).stem}_frame.png"
+        path = filedialog.asksaveasfilename(
+            title="Guardar fotograma", defaultextension=".png", initialfile=default_name,
+            filetypes=[("Imagen PNG", "*.png"), ("Imagen JPEG", "*.jpg")],
+        )
+        if not path:
+            return
+        try:
+            ffmpeg = discover_ffmpeg_tools()[0]
+            subprocess.run(
+                [ffmpeg, "-y", "-v", "error", "-ss", f"{self.cursor_time:.3f}", "-i", media.path, "-frames:v", "1", path],
+                capture_output=True, text=True, check=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            self.status.configure(text=f"Fotograma guardado: {pathlib.Path(path).name}", fg=GREEN)
+        except Exception as exc:
+            messagebox.showerror("Error al capturar", str(exc))
 
     def _clip_at_playhead(self, at_time=None):
         """Busca primero en pistas de vídeo activas (de arriba abajo) y luego en audio."""
@@ -2069,6 +2214,26 @@ class SimpleEditorPanel(tk.Frame):
     def _mode_key(self):
         return "selected" if self.export_mode.get().startswith("Solo") else "active"
 
+    def _resolution_key(self):
+        mapping = {"Auto": "auto", "1080p": "1080p", "720p": "720p", "9:16": "vertical"}
+        return mapping.get(self.export_resolution.get(), "auto")
+
+    def _ensure_playhead_visible(self):
+        region = self.timeline.cget("scrollregion").split()
+        if not region:
+            return
+        total = float(region[2]) or 1.0
+        width = max(1, self.timeline.winfo_width())
+        if total <= width:
+            return
+        left_frac, right_frac = self.timeline.xview()
+        px = self._x_at_time(self.playhead_timeline)
+        left_px = left_frac * total
+        right_px = right_frac * total
+        if px > right_px - 30 or px < left_px:
+            target_left = max(0.0, px - width * 0.25)
+            self.timeline.xview_moveto(min(1.0, target_left / total))
+
     def export(self):
         if self.exporting:
             self.status.configure(text="Ya hay una exportación en curso.", fg=YELLOW)
@@ -2076,6 +2241,17 @@ class SimpleEditorPanel(tk.Frame):
         tracks = self.project.export_tracks(self._mode_key())
         if not any(track.clips for track in tracks):
             messagebox.showerror("No se puede exportar", "No hay clips activos para exportar.")
+            return
+        missing = [
+            clip.media.path
+            for track in tracks for clip in track.clips
+            if not os.path.isfile(clip.media.path)
+        ]
+        if missing:
+            messagebox.showerror(
+                "Archivos no encontrados",
+                "Faltan archivos necesarios para exportar:\n\n" + "\n".join(dict.fromkeys(missing[:6])),
+            )
             return
         has_video = any(clip.media.has_video for track in tracks for clip in track.clips)
         has_audible = any(
@@ -2093,7 +2269,10 @@ class SimpleEditorPanel(tk.Frame):
         if not path:
             return
         try:
-            plan = build_export_plan(self.project, self._mode_key(), self.project.selected_track_index, path)
+            plan = build_export_plan(
+                self.project, self._mode_key(), self.project.selected_track_index,
+                path, resolution=self._resolution_key(),
+            )
         except Exception as exc:
             messagebox.showerror("No se puede exportar", str(exc))
             return
@@ -2141,6 +2320,7 @@ class SimpleEditorPanel(tk.Frame):
                     self.playhead_timeline = clip.timeline_start + self.cursor_time - clip.source_in
                     self._update_timecode()
                     self.redraw_timeline()
+                    self._ensure_playhead_visible()
             elif kind == "play_done" and event[1] == self.frame_token:
                 was_timeline = self._playback_from_timeline
                 prev_clip = self.selected_clip
@@ -2184,6 +2364,7 @@ class SimpleEditorPanel(tk.Frame):
                 self.playhead_timeline = clip.timeline_start + self.cursor_time - clip.source_in
                 self._update_timecode()
                 self.redraw_timeline()
+                self._ensure_playhead_visible()
         if self.winfo_exists():
             self._poll_after_id = self.after(60, self._poll_queue)
 

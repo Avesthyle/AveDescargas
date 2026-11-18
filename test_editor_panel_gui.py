@@ -765,6 +765,69 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_clone_clipboard_preserves_linked_audio_props_and_trim_to_playhead(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            v_media = MediaInfo(path="av.mp4", duration=10.0, has_video=True, has_audio=True, width=320, height=180, fps=30.0)
+            a_media = audio_media_from_video(v_media)
+            v_clip = Clip(v_media, source_out=6.0, timeline_start=0.0, use_source_audio=False, link_group="g1")
+            a_clip = Clip(a_media, source_out=6.0, timeline_start=0.0, link_group="g1", volume=1.5, pitch_semitones=3, fade_in=0.4)
+            panel.project.tracks[0].clips.append(v_clip)
+            panel.project.tracks[1].clips.append(a_clip)
+            cloned = panel._clone_for_clipboard(v_clip)
+            self.assertAlmostEqual(cloned.volume, 1.5, places=3)
+            self.assertEqual(cloned.pitch_semitones, 3)
+            self.assertAlmostEqual(cloned.fade_in, 0.4, places=3)
+
+            panel.selected_clip = v_clip
+            panel.playhead_timeline = 1.5
+            panel.trim_to_playhead("left")
+            self.assertAlmostEqual(panel.project.tracks[0].clips[0].timeline_start, 1.5, places=3)
+            self.assertAlmostEqual(panel.project.tracks[1].clips[0].timeline_start, 1.5, places=3)
+            panel.playhead_timeline = 4.0
+            panel.trim_to_playhead("right")
+            self.assertAlmostEqual(panel.project.tracks[0].clips[0].timeline_end, 4.0, places=3)
+            self.assertAlmostEqual(panel.project.tracks[1].clips[0].timeline_end, 4.0, places=3)
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
+    def test_library_insert_remove_and_export_missing_file_or_vertical_resolution(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            v_media = MediaInfo(path="/no/existe/v.mp4", duration=4.0, has_video=True, has_audio=True, width=640, height=360, fps=30.0)
+            panel.media_library.append(v_media)
+            panel.media_list.insert("end", "v.mp4")
+            panel.media_list.selection_set(0)
+            panel._insert_selected_media()
+            self.assertEqual(len(panel.project.tracks[0].clips), 1)
+            panel.remove_selected_library_media()
+            self.assertEqual(len(panel.media_library), 1)  # En uso en el timeline
+
+            with mock.patch("simple_editor_panel.filedialog.asksaveasfilename") as ask_mock, \
+                 mock.patch("simple_editor_panel.messagebox.showerror") as err_mock:
+                panel.export()
+            ask_mock.assert_not_called()
+            err_mock.assert_called_once()
+
+            from media_editor import build_export_plan
+            panel.project.tracks[1].clips.append(Clip(audio_media_from_video(v_media), source_out=2.0, timeline_start=0.0))
+            with mock.patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")):
+                plan = build_export_plan(panel.project, "active", 0, "/tmp/out.mp4", resolution="vertical")
+            self.assertEqual((plan["width"], plan["height"]), (1080, 1920))
+            self.assertIn("level=disabled", plan["filter_complex"])
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

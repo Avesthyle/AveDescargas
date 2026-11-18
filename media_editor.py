@@ -571,12 +571,21 @@ def _number(value: float) -> str:
     return f"{float(value):.3f}".rstrip("0").rstrip(".") or "0"
 
 
+EXPORT_RESOLUTIONS = {
+    "auto": None,
+    "1080p": (1920, 1080),
+    "720p": (1280, 720),
+    "vertical": (1080, 1920),
+}
+
+
 def build_export_plan(
     project: EditorProject,
     mode: str,
     selected_track: Optional[int],
     output_path: str,
     preview: bool = False,
+    resolution: str = "auto",
 ) -> dict:
     if selected_track is not None:
         project.selected_track_index = selected_track
@@ -590,8 +599,12 @@ def build_export_plan(
 
     video_tracks = [track for track in tracks if track.kind == "video" and track.clips]
     first_video = next((clip for track in video_tracks for clip in track.clips if clip.media.has_video), None)
-    width = first_video.media.width if first_video and first_video.media.width > 0 else (1280 if first_video else 0)
-    height = first_video.media.height if first_video and first_video.media.height > 0 else (720 if first_video else 0)
+    target_res = EXPORT_RESOLUTIONS.get(resolution)
+    if first_video and target_res is not None:
+        width, height = target_res
+    else:
+        width = first_video.media.width if first_video and first_video.media.width > 0 else (1280 if first_video else 0)
+        height = first_video.media.height if first_video and first_video.media.height > 0 else (720 if first_video else 0)
     raw_fps = first_video.media.fps if first_video and first_video.media.fps else 30.0
     fps = raw_fps if 10.0 <= raw_fps <= 60.0 else 30.0
     if first_video:
@@ -695,7 +708,7 @@ def build_export_plan(
         filter_parts.append(
             "".join(f"[{label}]" for label in audio_labels)
             + f"amix=inputs={len(audio_labels)}:normalize=0:dropout_transition=0,"
-            + f"alimiter=limit=0.95[{final_audio}]"
+            + f"alimiter=limit=0.98:level=disabled[{final_audio}]"
         )
 
     extension = pathlib.Path(output_path).suffix.lower()
