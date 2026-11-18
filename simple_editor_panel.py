@@ -638,6 +638,8 @@ class SimpleEditorPanel(tk.Frame):
             track.clips[index:index + 1] = [left, right]
             if clip is self.selected_clip:
                 self.selected_clip = left
+        if self.selected_clip:
+            self._sync_selection_marks(self.selected_clip)
         self._update_inspector()
         self.redraw_timeline()
         self.status.configure(text=f"Clip dividido en {format_editor_time(time_point)}.", fg=GREEN)
@@ -764,8 +766,7 @@ class SimpleEditorPanel(tk.Frame):
             return
         if target is self.timeline:
             event = event or type("DropEvent", (), {"x": 115, "y": 30})()
-            self.pending_library_media = accepted[-1]
-            self._drop_library_media(event)
+            self._drop_library_media(event, media_list=accepted)
         else:
             self.media_list.selection_clear(0, "end")
             self.media_list.selection_set(self.media_library.index(accepted[-1]))
@@ -1138,33 +1139,46 @@ class SimpleEditorPanel(tk.Frame):
             self.pending_library_media = None
             self.status.configure(text="Suelta el archivo dentro de un canal compatible.", fg=YELLOW)
 
-    def _drop_library_media(self, event):
-        media = self.pending_library_media
+    def _drop_library_media(self, event, media_list=None):
+        items = list(media_list) if media_list is not None else ([self.pending_library_media] if self.pending_library_media else [])
         self.pending_library_media = None
-        if not media:
+        if not items:
             return False
         track = self._track_at_y(self.timeline.canvasy(event.y))
-        if not track or (track.kind == "video" and not media.has_video) or (track.kind == "audio" and not media.has_audio):
+        compatible = [
+            m for m in items
+            if track and not ((track.kind == "video" and not m.has_video) or (track.kind == "audio" and not m.has_audio))
+        ]
+        if not track or not compatible:
             self.status.configure(text="Suelta el archivo en un canal compatible.", fg=RED)
             return True
         self._push_undo()
         raw_start = self._time_at_x(self.timeline.canvasx(event.x))
-        clip = Clip(media, timeline_start=raw_start, name=pathlib.Path(media.path).stem)
-        if self.snap_enabled.get():
-            points = collect_snap_points(self.project.tracks, playhead=self.playhead_timeline)
-            raw_start, _target = snap_timeline_position(raw_start, clip.duration, points, snap_threshold(self.zoom))
-        ranges = [(other.timeline_start, other.timeline_end) for other in track.clips]
-        clip.timeline_start = round(avoid_clip_overlap(raw_start, clip.duration, ranges), 6)
-        track.clips.append(clip)
-        self.selected_clip = clip
-        self.selected_media = media
+        added = []
+        for media in compatible:
+            clip = Clip(media, timeline_start=raw_start, name=pathlib.Path(media.path).stem)
+            if self.snap_enabled.get():
+                points = collect_snap_points(self.project.tracks, playhead=self.playhead_timeline)
+                raw_start, _target = snap_timeline_position(raw_start, clip.duration, points, snap_threshold(self.zoom))
+            ranges = [(other.timeline_start, other.timeline_end) for other in track.clips]
+            clip.timeline_start = round(avoid_clip_overlap(raw_start, clip.duration, ranges), 6)
+            track.clips.append(clip)
+            added.append(clip)
+            raw_start = clip.timeline_end
+        last_clip = added[-1]
+        self.selected_clip = last_clip
+        self.selected_media = last_clip.media
+        self._sync_selection_marks(last_clip)
         self.project.selected_track_index = self.project.tracks.index(track)
         if track is self._main_track():
             self._apply_magnetic()
         self._refresh_tracks()
         self._update_inspector()
         self.redraw_timeline()
-        self.status.configure(text=f"Añadido: {pathlib.Path(media.path).name}", fg=GREEN)
+        if len(added) == 1:
+            self.status.configure(text=f"Añadido: {pathlib.Path(last_clip.media.path).name}", fg=GREEN)
+        else:
+            self.status.configure(text=f"Añadidos {len(added)} clips.", fg=GREEN)
         return True
 
     def _select_media(self, _event=None):
@@ -1487,6 +1501,14 @@ class SimpleEditorPanel(tk.Frame):
         self.playback_started_at = None
         self.play_btn.configure(text="▶")
 
+    def _sync_selection_marks(self, clip=None):
+        clip = clip or self.selected_clip
+        if not clip:
+            return
+        self.mark_in = clip.source_in
+        self.mark_out = clip.source_out
+        self.cursor_time = max(clip.source_in, min(self.cursor_time, clip.source_out))
+
     def cut_selected_clip(self):
         clip = self.selected_clip
         if not clip or not self.selected_media or clip.media is not self.selected_media:
@@ -1514,6 +1536,7 @@ class SimpleEditorPanel(tk.Frame):
                 index = track.clips.index(clip)
                 track.clips[index:index + 1] = list(pieces)
                 self.selected_clip = pieces[0]
+                self._sync_selection_marks(self.selected_clip)
                 self.project.selected_track_index = self.project.tracks.index(track)
                 self._refresh_tracks()
                 self._update_inspector()
@@ -1780,6 +1803,7 @@ class SimpleEditorPanel(tk.Frame):
                 self._replace_linked(other, resize_clip_right(other, updated.timeline_end))
             if is_magnetic_main:
                 self._apply_magnetic()
+        self._sync_selection_marks(self.drag_clip)
         if self.snap_target is not None:
             self.snap_label = f"{self.snap_label}  ·  duración {format_editor_time(self.drag_clip.duration)}"
 
@@ -1869,6 +1893,7 @@ class SimpleEditorPanel(tk.Frame):
                 if is_trim:
                     clip.source_in = round(clip.source_in, 6)
                     clip.source_out = round(clip.source_out, 6)
+            self._sync_selection_marks(self.drag_clip)
             self._apply_magnetic()
             self._commit_pending_snapshot()
             self.drag_clip = None
@@ -1928,6 +1953,13 @@ class SimpleEditorPanel(tk.Frame):
             messagebox.showerror("No se puede exportar", "No hay clips activos para exportar.")
             return
         has_video = any(clip.media.has_video for track in tracks for clip in track.clips)
+        has_audible = any(
+            clip.media.has_audio and not track.muted and clip.use_source_audio
+            for track in tracks for clip in track.clips
+        )
+        if not has_video and not has_audible:
+            messagebox.showerror("No se puede exportar", "No hay pistas de vídeo ni de audio activas para exportar (revisa si están silenciadas).")
+            return
         default = ".mp4" if has_video else ".mp3"
         path = filedialog.asksaveasfilename(
             title="Exportar montaje", defaultextension=default, initialfile="montaje" + default,

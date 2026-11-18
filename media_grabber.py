@@ -446,12 +446,18 @@ def fetch_playlist_entries(url: str):
 
 def clean_folder(folder: str):
     """Elimina archivos temporales dejados por descargas incompletas o canceladas."""
-    temp_exts = {".part", ".ytdl", ".download", ".temp", ".m4a", ".webm", ".mkv", ".jpg", ".png", ".webp"}
+    temp_exts = {".part", ".ytdl", ".download", ".temp"}
     deleted_count = 0
     try:
         for f in os.listdir(folder):
-            _, ext = os.path.splitext(f)
-            if ext.lower() in temp_exts:
+            lower = f.lower()
+            _, ext = os.path.splitext(lower)
+            is_temp = (
+                ext in temp_exts
+                or ".temp." in lower
+                or bool(re.search(r"\.f\d+\.[a-z0-9]{2,5}$", lower))
+            )
+            if is_temp:
                 try:
                     os.remove(os.path.join(folder, f))
                     deleted_count += 1
@@ -991,6 +997,10 @@ class MediaGrabberApp:
 
         def scroll_body(event):
             if event.widget.winfo_toplevel() != self.root:
+                return
+            if self.notebook.select() != str(self.download_tab):
+                return
+            if event.widget in (self.terminal, self.url_input):
                 return
             if self.body_canvas.bbox("all"):
                 self.body_canvas.yview_scroll(int(-event.delta / 120), "units")

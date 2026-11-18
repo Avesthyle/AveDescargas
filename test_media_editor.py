@@ -262,6 +262,14 @@ class ExportPlanTests(unittest.TestCase):
         plan = build_export_plan(EditorProject([Track("A1", "audio", clips=[muted_audio, active_audio])]), "active", None, "salida.mp3")
         self.assertEqual(len(plan["audio_labels"]), 1)
 
+    def test_build_export_plan_rejects_fully_muted_audio_only_project(self):
+        muted_clip = Clip(audio_info("a.mp3", duration=5), source_out=5, use_source_audio=False)
+        with self.assertRaisesRegex(ValueError, "silenciadas"):
+            build_export_plan(EditorProject([Track("A1", "audio", clips=[muted_clip])]), "active", None, "salida.mp3")
+        active_clip = Clip(audio_info("a.mp3", duration=5), source_out=5, use_source_audio=True)
+        with self.assertRaisesRegex(ValueError, "silenciadas"):
+            build_export_plan(EditorProject([Track("A1", "audio", muted=True, clips=[active_clip])]), "active", None, "salida.mp3")
+
 
 if __name__ == "__main__":
     unittest.main()

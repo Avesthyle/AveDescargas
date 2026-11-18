@@ -307,6 +307,21 @@ class PlaylistHandlingTests(unittest.TestCase):
             ],
         )
 
+    def test_clean_folder_preserves_user_media_and_images(self):
+        from media_grabber import clean_folder
+        with tempfile.TemporaryDirectory() as folder:
+            keep = ["export.mkv", "clip.webm", "cancion.m4a", "foto.jpg", "logo.png", "portada.webp"]
+            remove = ["video.mp4.part", "video.ytdl", "video.f251.webm", "video.temp.mp4"]
+            for name in keep + remove:
+                with open(os.path.join(folder, name), "wb") as handle:
+                    handle.write(b"data")
+            deleted = clean_folder(folder)
+            self.assertEqual(deleted, len(remove))
+            for name in keep:
+                self.assertTrue(os.path.exists(os.path.join(folder, name)), name)
+            for name in remove:
+                self.assertFalse(os.path.exists(os.path.join(folder, name)), name)
+
 
 if __name__ == "__main__":
     unittest.main()

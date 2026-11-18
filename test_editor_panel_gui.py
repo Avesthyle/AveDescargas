@@ -555,6 +555,64 @@ class EditorEndToEndTests(unittest.TestCase):
             panel.destroy()
             root.destroy()
 
+    def test_trim_and_split_sync_mark_in_out(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            v_track = panel.project.tracks[0]
+            v_media = MediaInfo(path="v.mp4", duration=10.0, has_video=True, has_audio=False, width=320, height=180, fps=30.0)
+            clip = Clip(v_media, source_in=0.0, source_out=8.0, timeline_start=0.0)
+            v_track.clips = [clip]
+            panel.selected_clip = clip
+            panel.selected_media = v_media
+            panel.drag_clip = clip
+            panel.resize_side = "right"
+            panel._trim_drag(v_track, panel._x_at_time(6.0), alt=True)
+            self.assertAlmostEqual(panel.mark_out, 6.0, places=3)
+            panel.drag_clip = None
+            panel.playhead_timeline = 2.5
+            panel.split_at_playhead()
+            self.assertAlmostEqual(panel.mark_in, 0.0, places=3)
+            self.assertAlmostEqual(panel.mark_out, 2.5, places=3)
+        finally:
+            panel.destroy()
+            root.destroy()
+
+    def test_multi_file_drop_onto_timeline_inserts_all_compatible_clips(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            m1 = MediaInfo(path="v1.mp4", duration=3.0, has_video=True, has_audio=False, width=320, height=180, fps=30.0)
+            m2 = MediaInfo(path="v2.mp4", duration=4.0, has_video=True, has_audio=False, width=320, height=180, fps=30.0)
+            y1, y2 = panel._layout()[0]
+            ev = type("Drop", (), {"x": int(LABEL_WIDTH + 10), "y": int((y1 + y2) / 2)})()
+            with mock.patch("simple_editor_panel.os.path.isfile", return_value=True), \
+                 mock.patch.object(panel, "_add_or_get_media", side_effect=[m1, m2]):
+                panel._ingest_dropped_paths(["v1.mp4", "v2.mp4"], panel.timeline, ev)
+            self.assertEqual(len(panel.project.tracks[0].clips), 2)
+            self.assertAlmostEqual(panel.project.tracks[0].clips[1].timeline_start, panel.project.tracks[0].clips[0].timeline_end, places=5)
+        finally:
+            panel.destroy()
+            root.destroy()
+
+    def test_export_rejects_muted_audio_only_before_file_dialog(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            a_media = MediaInfo(path="a.mp3", duration=5.0, has_video=False, has_audio=True)
+            panel.project.tracks[1].clips.append(Clip(a_media, source_out=5.0, use_source_audio=False))
+            with mock.patch("simple_editor_panel.filedialog.asksaveasfilename") as ask_mock, \
+                 mock.patch("simple_editor_panel.messagebox.showerror") as err_mock:
+                panel.export()
+            ask_mock.assert_not_called()
+            err_mock.assert_called_once()
+        finally:
+            panel.destroy()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

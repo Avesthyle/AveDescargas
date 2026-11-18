@@ -701,6 +701,8 @@ def build_export_plan(
     extension = pathlib.Path(output_path).suffix.lower()
     if first_video and extension in {".mp3", ".wav"}:
         raise ValueError("Elige MP4, MOV, MKV o WEBM para exportar vídeo.")
+    if not first_video and not final_audio:
+        raise ValueError("No hay pistas de vídeo ni de audio activas para exportar (revisa si están silenciadas).")
     if not first_video and extension not in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}:
         raise ValueError("Elige un formato de audio para un proyecto sin vídeo.")
 
