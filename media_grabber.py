@@ -524,174 +524,178 @@ def run_downloads_thread(download_targets, output_dir, fmt, video_quality, inclu
     IS_DOWNLOADING = True
     CANCEL_REQUESTED = False
 
-    ffmpeg_path = get_ffmpeg_path()
-    ui_queue.put({'type': 'start', 'total': len(download_targets)})
-
     ok_count = 0
     err_count = 0
     cancelled = False
 
-    for index, target in enumerate(download_targets):
-        if CANCEL_REQUESTED:
-            cancelled = True
-            break
+    try:
+        ffmpeg_path = get_ffmpeg_path()
+        ui_queue.put({'type': 'start', 'total': len(download_targets)})
 
-        url = target['url'].strip()
-        if not url:
-            continue
+        for index, target in enumerate(download_targets):
+            if CANCEL_REQUESTED:
+                cancelled = True
+                break
 
-        platform = detect_platform(url)
-        ui_queue.put({'type': 'active_url', 'index': index, 'url': url, 'platform': platform})
-        if fmt == "mp4":
-            notice = heavy_clip_notice(target, video_quality)
-            if notice:
-                ui_queue.put({'type': 'log', 'text': notice, 'level': 'warning'})
+            url = target['url'].strip()
+            if not url:
+                continue
 
-        node_path = shutil.which("node")
-        ydl_opts = {
-            # El ID evita que dos vídeos con el mismo título se sobrescriban.
-            'outtmpl': build_output_template(output_dir, target),
-            'overwrites': False,
-            'logger': YtDlpLogger(),
-            'progress_hooks': [progress_hook],
-            'nocheckcertificate': True,
-            'ignoreerrors': False,
-            'no_color': True,
-            'quiet': True,
-            'remote_components': ['ejs:github'],
-        }
-        ydl_opts.update(download_scope_options(target))
-        ydl_opts.update(clip_download_options(target, fmt))
+            platform = detect_platform(url)
+            ui_queue.put({'type': 'active_url', 'index': index, 'url': url, 'platform': platform})
+            if fmt == "mp4":
+                notice = heavy_clip_notice(target, video_quality)
+                if notice:
+                    ui_queue.put({'type': 'log', 'text': notice, 'level': 'warning'})
 
-        if node_path:
-            ydl_opts['js_runtimes'] = {
-                'node': {
-                    'path': node_path
-                }
+            node_path = shutil.which("node")
+            ydl_opts = {
+                # El ID evita que dos vídeos con el mismo título se sobrescriban.
+                'outtmpl': build_output_template(output_dir, target),
+                'overwrites': False,
+                'logger': YtDlpLogger(),
+                'progress_hooks': [progress_hook],
+                'nocheckcertificate': True,
+                'ignoreerrors': False,
+                'no_color': True,
+                'quiet': True,
+                'remote_components': ['ejs:github'],
             }
+            ydl_opts.update(download_scope_options(target))
+            ydl_opts.update(clip_download_options(target, fmt))
 
-        if ffmpeg_path:
-            ydl_opts['ffmpeg_location'] = ffmpeg_path
-
-        if target.get('section_start') is not None and not ffmpeg_path:
-            ui_queue.put({
-                'type': 'log',
-                'text': '❌ FFmpeg no está instalado o no se encuentra. Es necesario para descargar solo un fragmento.',
-                'level': 'error'
-            })
-            err_count += 1
-            continue
-
-        if fmt == "mp3":
-            ydl_opts.update({
-                'format': 'bestaudio[ext=m4a]/bestaudio/best',
-                'postprocessors': [
-                    {
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '320',
-                    },
-                    {
-                        'key': 'EmbedThumbnail',
+            if node_path:
+                ydl_opts['js_runtimes'] = {
+                    'node': {
+                        'path': node_path
                     }
-                ],
-                'writethumbnail': True,
-            })
-        else: # mp4
-            if include_audio and not ffmpeg_path:
+                }
+
+            if ffmpeg_path:
+                ydl_opts['ffmpeg_location'] = ffmpeg_path
+
+            if target.get('section_start') is not None and not ffmpeg_path:
                 ui_queue.put({
                     'type': 'log',
-                    'text': '❌ FFmpeg no está instalado o no se encuentra. Es necesario para unir vídeo y sonido.',
+                    'text': '❌ FFmpeg no está instalado o no se encuentra. Es necesario para descargar solo un fragmento.',
                     'level': 'error'
                 })
                 err_count += 1
                 continue
-            ydl_opts.update({
-                'format': build_video_format(video_quality, include_audio),
-                'merge_output_format': 'mp4',
-            })
-            if not include_audio:
-                ydl_opts['postprocessors'] = [{
-                    'key': 'FFmpegVideoRemuxer',
-                    'preferedformat': 'mp4',
-                }]
 
-        if platform == 'youtube':
-            ydl_opts.update(youtube_extractor_options(fmt, include_audio))
-        # Instagram solo entrega el audio de algunas publicaciones a sesiones
-        # iniciadas: si falla sin sesión, se reintenta con cookies del navegador.
-        attempts = [None]
-        if platform == 'instagram':
-            attempts += ['firefox', 'edge', 'chrome', 'brave', 'opera']
-        try:
-            last_error = None
-            login_browser_opened = False
-            for browser in attempts:
-                opts = dict(ydl_opts)
-                if browser:
-                    opts = authenticated_retry_options(ydl_opts, browser, platform)
-                    service = 'YouTube' if platform == 'youtube' else 'Instagram'
-                    shown_browser = 'chrome' if browser.startswith('chrome') else browser
-                    ui_queue.put({'type': 'log', 'text': f'🔑 Reintentando {service} con la sesión de {shown_browser}...', 'level': 'warning'})
-                try:
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        info = ydl.extract_info(url, download=True)
-                    if fmt == "mp4" and include_audio and not has_audio(info):
-                        ui_queue.put({'type': 'log', 'text': 'ℹ️ Esta publicación no tiene audio disponible: se ha guardado solo el vídeo.', 'level': 'warning'})
-                    last_error = None
-                    break
-                except DownloadCancelledException:
-                    raise
-                except Exception as attempt_error:
-                    # Conserva el error real (sin audio) y no el de cookies
-                    if last_error is None:
-                        last_error = attempt_error
-                    if platform == 'youtube' and is_youtube_auth_challenge(attempt_error):
-                        if browser is None and youtube_profile_has_cookies():
-                            attempts.append('chrome')
-                            continue
-                        if not login_browser_opened:
-                            login_browser_opened = True
-                            ui_queue.put({'type': 'youtube_login_opened'})
-                            login_process = open_youtube_login_browser(url)
-                            if login_process is None:
-                                ui_queue.put({'type': 'log', 'text': '❌ No se pudo abrir Chrome para iniciar sesión en YouTube.', 'level': 'error'})
-                                break
-                            while login_process.poll() is None and not CANCEL_REQUESTED:
-                                time.sleep(0.5)
-                            if CANCEL_REQUESTED:
-                                raise DownloadCancelledException("Cancelado por el usuario")
-                            if youtube_profile_has_cookies():
-                                attempts.append('chrome_refreshed')
-                                continue
-                    if platform != 'instagram':
+            if fmt == "mp3":
+                ydl_opts.update({
+                    'format': 'bestaudio[ext=m4a]/bestaudio/best',
+                    'postprocessors': [
+                        {
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': '320',
+                        },
+                        {
+                            'key': 'EmbedThumbnail',
+                        }
+                    ],
+                    'writethumbnail': True,
+                })
+            else: # mp4
+                if include_audio and not ffmpeg_path:
+                    ui_queue.put({
+                        'type': 'log',
+                        'text': '❌ FFmpeg no está instalado o no se encuentra. Es necesario para unir vídeo y sonido.',
+                        'level': 'error'
+                    })
+                    err_count += 1
+                    continue
+                ydl_opts.update({
+                    'format': build_video_format(video_quality, include_audio),
+                    'merge_output_format': 'mp4',
+                })
+                if not include_audio:
+                    ydl_opts['postprocessors'] = [{
+                        'key': 'FFmpegVideoRemuxer',
+                        'preferedformat': 'mp4',
+                    }]
+
+            if platform == 'youtube':
+                ydl_opts.update(youtube_extractor_options(fmt, include_audio))
+            # Instagram solo entrega el audio de algunas publicaciones a sesiones
+            # iniciadas: si falla sin sesión, se reintenta con cookies del navegador.
+            attempts = [None]
+            if platform == 'instagram':
+                attempts += ['firefox', 'edge', 'chrome', 'brave', 'opera']
+            try:
+                last_error = None
+                login_browser_opened = False
+                for browser in attempts:
+                    opts = dict(ydl_opts)
+                    if browser:
+                        opts = authenticated_retry_options(ydl_opts, browser, platform)
+                        service = 'YouTube' if platform == 'youtube' else 'Instagram'
+                        shown_browser = 'chrome' if browser.startswith('chrome') else browser
+                        ui_queue.put({'type': 'log', 'text': f'🔑 Reintentando {service} con la sesión de {shown_browser}...', 'level': 'warning'})
+                    try:
+                        with yt_dlp.YoutubeDL(opts) as ydl:
+                            info = ydl.extract_info(url, download=True)
+                        if fmt == "mp4" and include_audio and not has_audio(info):
+                            ui_queue.put({'type': 'log', 'text': 'ℹ️ Esta publicación no tiene audio disponible: se ha guardado solo el vídeo.', 'level': 'warning'})
+                        last_error = None
                         break
-            if last_error:
-                raise last_error
-            ok_count += 1
-        except DownloadCancelledException:
-            cancelled = True
-            ui_queue.put({'type': 'log', 'text': '🚫 Proceso interrumpido por el usuario.', 'level': 'warning'})
-            break
-        except Exception as e:
-            err_msg = str(e)
-            err_msg = re.sub(r'ERROR:\s*', '', err_msg)
-            if fmt == "mp4" and include_audio and "Requested format is not available" in err_msg:
-                err_msg = (
-                    "Instagram no entrega el audio de esta publicación sin sesión iniciada. "
-                    "Inicia sesión en Instagram en Firefox, Edge o Chrome (y cierra el navegador) "
-                    "y vuelve a intentarlo; no se guardará un vídeo sin sonido."
-                )
-            ui_queue.put({'type': 'log', 'text': f"❌ Error: {err_msg}", 'level': 'error'})
-            err_count += 1
-
-    ui_queue.put({
-        'type': 'complete',
-        'ok_count': ok_count,
-        'err_count': err_count,
-        'cancelled': cancelled
-    })
-    IS_DOWNLOADING = False
+                    except DownloadCancelledException:
+                        raise
+                    except Exception as attempt_error:
+                        # Conserva el error real (sin audio) y no el de cookies
+                        if last_error is None:
+                            last_error = attempt_error
+                        if platform == 'youtube' and is_youtube_auth_challenge(attempt_error):
+                            if browser is None and youtube_profile_has_cookies():
+                                attempts.append('chrome')
+                                continue
+                            if not login_browser_opened:
+                                login_browser_opened = True
+                                ui_queue.put({'type': 'youtube_login_opened'})
+                                login_process = open_youtube_login_browser(url)
+                                if login_process is None:
+                                    ui_queue.put({'type': 'log', 'text': '❌ No se pudo abrir Chrome para iniciar sesión en YouTube.', 'level': 'error'})
+                                    break
+                                while login_process.poll() is None and not CANCEL_REQUESTED:
+                                    time.sleep(0.5)
+                                if CANCEL_REQUESTED:
+                                    raise DownloadCancelledException("Cancelado por el usuario")
+                                if youtube_profile_has_cookies():
+                                    attempts.append('chrome_refreshed')
+                                    continue
+                        if platform != 'instagram':
+                            break
+                if last_error:
+                    raise last_error
+                ok_count += 1
+            except DownloadCancelledException:
+                cancelled = True
+                ui_queue.put({'type': 'log', 'text': '🚫 Proceso interrumpido por el usuario.', 'level': 'warning'})
+                break
+            except Exception as e:
+                err_msg = str(e)
+                err_msg = re.sub(r'ERROR:\s*', '', err_msg)
+                if fmt == "mp4" and include_audio and "Requested format is not available" in err_msg:
+                    err_msg = (
+                        "Instagram no entrega el audio de esta publicación sin sesión iniciada. "
+                        "Inicia sesión en Instagram en Firefox, Edge o Chrome (y cierra el navegador) "
+                        "y vuelve a intentarlo; no se guardará un vídeo sin sonido."
+                    )
+                ui_queue.put({'type': 'log', 'text': f"❌ Error: {err_msg}", 'level': 'error'})
+                err_count += 1
+    except Exception as exc:
+        err_count += 1
+        ui_queue.put({'type': 'log', 'text': f"❌ Error inesperado: {exc}", 'level': 'error'})
+    finally:
+        ui_queue.put({
+            'type': 'complete',
+            'ok_count': ok_count,
+            'err_count': err_count,
+            'cancelled': cancelled
+        })
+        IS_DOWNLOADING = False
 
 
 def ask_playlist_action(parent):

@@ -646,6 +646,7 @@ class SimpleEditorPanel(tk.Frame):
     def _move_playhead(self, seconds):
         self.playhead_timeline = max(0.0, float(seconds))
         self._seek_timeline(type("SeekEvent", (), {"x": self._x_at_time(self.playhead_timeline) - self.timeline.canvasx(0)})())
+        self._ensure_playhead_visible()
 
     def split_at_playhead(self):
         """Divide en el cabezal el clip seleccionado (o los clips bajo el cabezal en la pista seleccionada)."""
@@ -1559,6 +1560,16 @@ class SimpleEditorPanel(tk.Frame):
                 return other
         return None
 
+    def _terminate_processes(self):
+        for attr in ("video_process", "audio_process"):
+            process = getattr(self, attr, None)
+            if process and process.poll() is None:
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+            setattr(self, attr, None)
+
     def toggle_play(self, from_mark=False):
         if self.playing:
             self.stop_playback()
@@ -1570,6 +1581,7 @@ class SimpleEditorPanel(tk.Frame):
             self._playback_from_timeline = False
             self.status.configure(text=f"Archivo no encontrado: {os.path.basename(media.path)}", fg=RED)
             return
+        self._terminate_processes()
         start, end = playback_range(self.cursor_time, self.mark_in, self.mark_out, media.duration, from_mark=from_mark)
         self.cursor_time = start
         self.playback_started_at = None
@@ -1704,6 +1716,7 @@ class SimpleEditorPanel(tk.Frame):
             self.play_btn.configure(text="▶")
             self.status.configure(text=f"Archivo no encontrado: {os.path.basename(media.path)}", fg=RED)
             return
+        self._terminate_processes()
         try:
             _, _, ffplay = discover_ffmpeg_tools()
         except Exception as exc:
@@ -1988,6 +2001,13 @@ class SimpleEditorPanel(tk.Frame):
             self._resize_origin = (y, self._row_height(track))
             self._pending_snapshot = self._snapshot()
             self.drag_clip = None
+            return
+        if x < LABEL_WIDTH:
+            track = self._track_at_y(y)
+            if track:
+                self.project.selected_track_index = self.project.tracks.index(track)
+                self._refresh_tracks()
+                self.redraw_timeline()
             return
         hit = self._clip_at(x, y)
         if hit is None:

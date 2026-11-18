@@ -368,6 +368,13 @@ class PlaylistHandlingTests(unittest.TestCase):
         self.assertEqual(dummy.custom_name_var.get(), "")
         self.assertIsNone(dummy.title_lookup_url)
 
+    def test_run_downloads_thread_resets_is_downloading_on_unexpected_error(self):
+        from unittest import mock
+        import media_grabber
+        with mock.patch("media_grabber.get_ffmpeg_path", side_effect=RuntimeError("boom")):
+            media_grabber.run_downloads_thread([{"url": "https://example.com"}], "/tmp", "mp4", "1080p (Full HD)")
+        self.assertFalse(media_grabber.IS_DOWNLOADING)
+
 
 if __name__ == "__main__":
     unittest.main()

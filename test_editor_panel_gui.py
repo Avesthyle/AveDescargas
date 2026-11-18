@@ -861,6 +861,23 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_track_header_click_preserves_playhead_and_move_playhead_scrolls(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            panel.playhead_timeline = 4.25
+            y1, y2 = panel._layout()[1]
+            panel._timeline_press(type("E", (), {"x": 20, "y": int((y1 + y2) / 2)})())
+            self.assertEqual(panel.project.selected_track_index, 1)
+            self.assertAlmostEqual(panel.playhead_timeline, 4.25, places=5)
+            self.assertFalse(panel.scrubbing)
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

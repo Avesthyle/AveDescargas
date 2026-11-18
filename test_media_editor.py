@@ -275,6 +275,22 @@ class ExportPlanTests(unittest.TestCase):
         plan = build_export_plan(EditorProject([Track("V1", "video", clips=[Clip(v, source_out=5)])]), "active", None, "salida.mp4")
         self.assertEqual((plan["width"], plan["height"]), (1280, 720))
 
+    def test_probe_media_skips_empty_or_zero_duration(self):
+        import json
+        from media_editor import probe_media
+        payload = json.dumps({
+            "format": {"duration": "", "format_name": "mp4"},
+            "streams": [
+                {"codec_type": "video", "width": 1280, "height": 720, "avg_frame_rate": "30/1", "duration": "0"},
+                {"codec_type": "audio", "duration": "12.5", "codec_name": "aac"},
+            ],
+        })
+        fake = type("R", (), {"returncode": 0, "stdout": payload, "stderr": ""})()
+        with patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             patch("media_editor.subprocess.run", return_value=fake):
+            info = probe_media("test.mp4")
+        self.assertAlmostEqual(info.duration, 12.5, places=3)
+
 
 if __name__ == "__main__":
     unittest.main()

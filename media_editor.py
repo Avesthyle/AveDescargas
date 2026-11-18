@@ -550,7 +550,15 @@ def probe_media(path: str) -> MediaInfo:
         video.get("duration") if video else None,
         audio.get("duration") if audio else None,
     ]
-    duration = next((float(value) for value in duration_values if value not in (None, "N/A")), 0.0)
+    duration = 0.0
+    for value in duration_values:
+        try:
+            candidate = float(value)
+        except (TypeError, ValueError):
+            continue
+        if candidate > 0:
+            duration = candidate
+            break
     if duration <= 0:
         raise ValueError("No se pudo determinar la duración del archivo.")
     return MediaInfo(
