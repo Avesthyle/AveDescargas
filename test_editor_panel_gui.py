@@ -305,6 +305,37 @@ class EditorPanelGuiTests(unittest.TestCase):
         self.assertEqual(len(self.video.clips), 3)
         self.assertAlmostEqual(self.video.clips[2].timeline_start, 8.0)
 
+    def test_close_gap_moves_linked_clips_together(self):
+        v = self.add(self.video, 5.0, 3.0)
+        a = self.add(self.audio, 5.0, 3.0, fake_media(path="a.mp3", video=False))
+        v.link_group = "g1"
+        a.link_group = "g1"
+        self.panel.close_gap_at(self.video, 1.0)
+        self.assertAlmostEqual(v.timeline_start, 0.0)
+        self.assertAlmostEqual(a.timeline_start, 0.0)
+
+    def test_separate_audio_without_audio_track_creates_single_undo_step(self):
+        self.panel.project.tracks = [self.video]
+        self.panel.undo_stack.clear()
+        media = MediaInfo(path="av.mp4", duration=10.0, has_video=True, has_audio=True, width=640, height=360, fps=25.0)
+        vclip = self.add(self.video, 0, 5, media)
+        self.panel.selected_clip = vclip
+        self.panel.toggle_linked_media()
+        self.assertEqual(len(self.panel.undo_stack), 1)
+        self.assertIsNotNone(self.panel._linked_audio_source(vclip))
+
+    def test_continuous_playback_does_not_rewind_to_long_background_audio(self):
+        v1 = self.add(self.video, 0.0, 4.0, fake_media(path="v1.mp4", video=True))
+        self.add(self.audio, 0.0, 20.0, fake_media(path="bgm.mp3", video=False))
+        self.panel.selected_clip = v1
+        self.panel._playback_from_timeline = True
+        self.panel.frame_token = 42
+        called = []
+        self.panel.play_from_cursor = lambda: called.append(self.panel.playhead_timeline)
+        self.panel.ui_queue.put(("play_done", 42))
+        self.panel._poll_queue()
+        self.assertEqual(len(called), 1)
+        self.assertGreaterEqual(called[0], 4.0)
 
 
 @unittest.skipUnless(HAS_DISPLAY and shutil.which("ffmpeg") and shutil.which("ffprobe"), "Necesita pantalla y FFmpeg")

@@ -349,12 +349,13 @@ def split_clip(clip: Clip, timeline_time: float) -> Optional[tuple[Clip, Clip]]:
     if cut >= clip.timeline_end - MIN_CLIP_DURATION:
         return None
     source_cut = clip.source_in + (cut - clip.timeline_start)
-    left = replace(clip, source_out=source_cut, name=f"{clip.name} · 1")
+    left = replace(clip, source_out=source_cut, name=f"{clip.name} · 1", fade_out=0.0)
     right = replace(
         clip,
         source_in=source_cut,
         timeline_start=cut,
         name=f"{clip.name} · 2",
+        fade_in=0.0,
     )
     return left, right
 
@@ -566,10 +567,13 @@ def build_export_plan(
     width = first_video.media.width if first_video else 0
     height = first_video.media.height if first_video else 0
     fps = first_video.media.fps if first_video and first_video.media.fps else 30.0
-    if preview and first_video:
-        ratio = min(1.0, 854 / width, 480 / height)
-        width = max(2, int(width * ratio) // 2 * 2)
-        height = max(2, int(height * ratio) // 2 * 2)
+    if first_video:
+        if preview:
+            ratio = min(1.0, 854 / max(1, width), 480 / max(1, height))
+            width = int(width * ratio)
+            height = int(height * ratio)
+        width = max(2, int(width) // 2 * 2)
+        height = max(2, int(height) // 2 * 2)
 
     inputs = []
     filter_parts = []
@@ -754,10 +758,18 @@ def run_export(plan: dict, progress_callback: Optional[Callable[[str], None]] = 
     return plan["output_path"]
 
 
-def project_to_dict(project: EditorProject, track_heights: Optional[dict[str, float]] = None) -> dict:
+def project_to_dict(
+    project: EditorProject,
+    track_heights: Optional[dict[str, float]] = None,
+    media_library: Optional[list[MediaInfo]] = None,
+) -> dict:
     """Serializa un EditorProject a un diccionario JSON."""
     media_list: list[MediaInfo] = []
     media_index: dict[int, int] = {}
+    for media in media_library or []:
+        if id(media) not in media_index:
+            media_index[id(media)] = len(media_list)
+            media_list.append(media)
     for track in project.tracks:
         for clip in track.clips:
             if id(clip.media) not in media_index:
@@ -857,8 +869,13 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
     return project, heights, media_list
 
 
-def save_project(path: str, project: EditorProject, track_heights: Optional[dict[str, float]] = None) -> str:
-    payload = project_to_dict(project, track_heights)
+def save_project(
+    path: str,
+    project: EditorProject,
+    track_heights: Optional[dict[str, float]] = None,
+    media_library: Optional[list[MediaInfo]] = None,
+) -> str:
+    payload = project_to_dict(project, track_heights, media_library=media_library)
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
     return path

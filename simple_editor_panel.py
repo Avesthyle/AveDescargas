@@ -250,6 +250,7 @@ class SimpleEditorPanel(tk.Frame):
         self.volume_spin = ttk.Spinbox(vol_row, from_=0, to=200, increment=5, textvariable=self.volume_var, width=6, command=self._apply_audio_props)
         self.volume_spin.pack(side="right")
         self.volume_spin.bind("<Return>", lambda _e: self._apply_audio_props())
+        self.volume_spin.bind("<FocusOut>", lambda _e: self._apply_audio_props())
 
         fade_row = tk.Frame(inspector_panel, bg=PANEL)
         fade_row.pack(fill="x", padx=10, pady=(4, 4))
@@ -259,7 +260,9 @@ class SimpleEditorPanel(tk.Frame):
         self.fade_in_spin = ttk.Spinbox(fade_row, from_=0.0, to=10.0, increment=0.25, textvariable=self.fade_in_var, width=5, command=self._apply_audio_props)
         self.fade_in_spin.pack(side="right")
         self.fade_in_spin.bind("<Return>", lambda _e: self._apply_audio_props())
+        self.fade_in_spin.bind("<FocusOut>", lambda _e: self._apply_audio_props())
         self.fade_out_spin.bind("<Return>", lambda _e: self._apply_audio_props())
+        self.fade_out_spin.bind("<FocusOut>", lambda _e: self._apply_audio_props())
 
         tk.Label(inspector_panel, text="Cambio de tono", bg=PANEL, fg=TEXT, font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=(8, 2))
         self.pitch_combo = ttk.Combobox(inspector_panel, textvariable=self.pitch_var, values=self.pitch_options, state="readonly")
@@ -354,8 +357,9 @@ class SimpleEditorPanel(tk.Frame):
         self.undo_stack.clear()
         self._update_undo_buttons()
 
-    def add_track(self, kind):
-        self._push_undo()
+    def add_track(self, kind, record_undo=True):
+        if record_undo:
+            self._push_undo()
         name = unique_track_name([track.name for track in self.project.tracks], kind)
         track = Track(name, kind)
         self.project.tracks.append(track)
@@ -484,8 +488,11 @@ class SimpleEditorPanel(tk.Frame):
         if ctrl:
             track = self._track_at_y(y)
             if track:
-                self.track_heights[track.name] = clamp_track_height(self._row_height(track) + step * 8)
-                self.redraw_timeline()
+                new_height = clamp_track_height(self._row_height(track) + step * 8)
+                if new_height != self._row_height(track):
+                    self._push_undo()
+                    self.track_heights[track.name] = new_height
+                    self.redraw_timeline()
         elif alt:
             self.set_zoom(self.zoom * (1.2 if step > 0 else 1 / 1.2), anchor_time=self._time_at_x(x))
         elif shift:
@@ -615,11 +622,18 @@ class SimpleEditorPanel(tk.Frame):
         self.status.configure(text="Clip eliminado y hueco cerrado.", fg=GREEN)
 
     def close_gap_at(self, track, time_point):
-        if find_gap(track.clips, time_point) is None:
+        gap = find_gap(track.clips, time_point)
+        if gap is None:
             self.status.configure(text="Ahí no hay ningún hueco que cerrar.", fg=YELLOW)
             return
         self._push_undo()
+        _gap_start, gap_end = gap
+        moved = [clip for clip in track.clips if clip.timeline_start >= gap_end - 1e-6]
         shift = close_gap(track.clips, time_point)
+        if shift > 0:
+            for clip in moved:
+                for linked in self._linked_clips(clip):
+                    linked.timeline_start = round(max(0.0, linked.timeline_start - shift), 6)
         self.redraw_timeline()
         self.status.configure(text=f"Hueco de {format_editor_time(shift)} cerrado en {track.name}.", fg=GREEN)
 
@@ -769,7 +783,7 @@ class SimpleEditorPanel(tk.Frame):
             return
         audio_track = next((item for item in self.project.tracks if item.kind == "audio"), None)
         if not audio_track:
-            audio_track = self.add_track("audio")
+            audio_track = self.add_track("audio", record_undo=False)
         audio_media = audio_media_from_video(clip.media)
         link_id = "link-" + str(id(clip))
         audio_clip = Clip(
@@ -798,9 +812,10 @@ class SimpleEditorPanel(tk.Frame):
         if abs(clip.volume - vol) < 1e-4 and abs(clip.fade_in - fade_in) < 1e-4 and abs(clip.fade_out - fade_out) < 1e-4:
             return
         self._push_undo()
-        clip.volume = vol
-        clip.fade_in = fade_in
-        clip.fade_out = fade_out
+        for target in [clip] + self._linked_clips(clip):
+            target.volume = vol
+            target.fade_in = min(fade_in, target.duration)
+            target.fade_out = min(fade_out, target.duration)
         self.redraw_timeline()
         self.status.configure(text=f"Volumen: {int(round(vol * 100))}% · Fundidos: {fade_in:.2f}s / {fade_out:.2f}s", fg=GREEN)
 
@@ -815,7 +830,8 @@ class SimpleEditorPanel(tk.Frame):
         if self.selected_clip.pitch_semitones == value:
             return
         self._push_undo()
-        self.selected_clip.pitch_semitones = value
+        for target in [self.selected_clip] + self._linked_clips(self.selected_clip):
+            target.pitch_semitones = value
         self._update_inspector()
         self.status.configure(text=f"Tono del clip: {value:+d} semitonos.", fg=GREEN)
 
@@ -862,7 +878,7 @@ class SimpleEditorPanel(tk.Frame):
         if not track or track.kind != kind:
             track = next((t for t in self.project.tracks if t.kind == kind), None)
         if not track:
-            track = self.add_track(kind)
+            track = self.add_track(kind, record_undo=False)
         self._push_undo()
         pasted = copy.deepcopy(self.clipboard_clip)
         wanted = self.playhead_timeline if at_time is None else float(at_time)
@@ -904,7 +920,7 @@ class SimpleEditorPanel(tk.Frame):
         if not path:
             return
         try:
-            save_project(path, self.project, self.track_heights)
+            save_project(path, self.project, self.track_heights, media_library=self.media_library)
             self.status.configure(text=f"Proyecto guardado: {pathlib.Path(path).name}", fg=GREEN)
         except Exception as exc:
             messagebox.showerror("Error al guardar", str(exc))
@@ -926,15 +942,30 @@ class SimpleEditorPanel(tk.Frame):
         self.project = project
         self.track_heights = heights
         self.selected_clip = None
+        self.selected_media = None
+        self.waveform_cache.clear()
+        self.waveform_pending.clear()
         self.media_library = media_list
         self.media_list.delete(0, "end")
+        missing = []
         for media in media_list:
+            exists = os.path.isfile(media.path)
+            if not exists:
+                missing.append(media.path)
             icon = "▶" if media.has_video else "♫"
-            self.media_list.insert("end", f"{icon}  {pathlib.Path(media.path).name}   ·   {format_editor_time(media.duration)}")
+            suffix = "" if exists else " (no encontrado)"
+            self.media_list.insert("end", f"{icon}  {pathlib.Path(media.path).name}   ·   {format_editor_time(media.duration)}{suffix}")
         self._refresh_tracks()
         self._update_inspector()
         self.redraw_timeline()
-        self.status.configure(text=f"Proyecto cargado: {pathlib.Path(path).name}", fg=GREEN)
+        if missing:
+            messagebox.showwarning(
+                "Archivos no encontrados",
+                "Algunos archivos del proyecto ya no están en su ruta:\n\n" + "\n".join(missing[:8]),
+            )
+            self.status.configure(text=f"Proyecto cargado con {len(missing)} archivo(s) ausente(s).", fg=YELLOW)
+        else:
+            self.status.configure(text=f"Proyecto cargado: {pathlib.Path(path).name}", fg=GREEN)
 
     def toggle_track(self):
         track = self.project.selected_track()
@@ -1143,6 +1174,40 @@ class SimpleEditorPanel(tk.Frame):
         self._update_inspector()
         self.toggle_play(from_mark=False)
 
+    @staticmethod
+    def _preview_fade_filters(clip_ref, start, duration, is_audio=False):
+        if not clip_ref:
+            return []
+        filters = []
+        prefix = "afade" if is_audio else "fade"
+        if clip_ref.fade_in > 0:
+            d_in = min(clip_ref.fade_in, clip_ref.duration)
+            fade_in_end = clip_ref.source_in + d_in
+            if start < fade_in_end - 1e-4:
+                st_in = max(0.0, clip_ref.source_in - start)
+                rem_in = min(duration, fade_in_end - max(start, clip_ref.source_in))
+                if rem_in > 0.01:
+                    filters.append(f"{prefix}=t=in:st={st_in:.3f}:d={rem_in:.3f}")
+        if clip_ref.fade_out > 0:
+            d_out = min(clip_ref.fade_out, clip_ref.duration)
+            fade_out_start = clip_ref.source_out - d_out
+            if start + duration > fade_out_start + 1e-4:
+                st_out = max(0.0, fade_out_start - start)
+                rem_out = min(d_out, (start + duration) - fade_out_start)
+                if rem_out > 0.01:
+                    filters.append(f"{prefix}=t=out:st={st_out:.3f}:d={rem_out:.3f}")
+        return filters
+
+    def _linked_audio_source(self, clip_ref):
+        """Devuelve el clip de audio vinculado activo si el vídeo tiene el audio separado."""
+        if not clip_ref or clip_ref.use_source_audio:
+            return None
+        for other in self._linked_clips(clip_ref):
+            other_track = self._track_of(other)
+            if other.media.has_audio and other_track and other_track.enabled and not other_track.muted:
+                return other
+        return None
+
     def toggle_play(self, from_mark=False):
         if self.playing:
             self.stop_playback()
@@ -1168,10 +1233,21 @@ class SimpleEditorPanel(tk.Frame):
         self.frame_token += 1
         token = self.frame_token
         duration = max(0.1, end - start)
-        play_audio = bool(media.has_audio and self.keep_audio.get() and not track_muted)
         clip_ref = self.selected_clip if self.selected_clip and self.selected_clip.media is media else None
-        pitch_filter = build_pitch_filter(getattr(clip_ref, "pitch_semitones", 0))
-        volume = getattr(clip_ref, "volume", 1.0)
+        linked_audio = self._linked_audio_source(clip_ref)
+        audio_clip = linked_audio or clip_ref
+        play_audio = bool(
+            (linked_audio is not None)
+            or (media.has_audio and self.keep_audio.get() and not track_muted)
+        )
+        audio_path = linked_audio.media.path if linked_audio else media.path
+        pitch_filter = build_pitch_filter(getattr(audio_clip, "pitch_semitones", 0))
+        volume = getattr(audio_clip, "volume", 1.0)
+        vf_parts = [
+            f"scale={self.PREVIEW_WIDTH}:{self.PREVIEW_HEIGHT}:force_original_aspect_ratio=decrease",
+            f"pad={self.PREVIEW_WIDTH}:{self.PREVIEW_HEIGHT}:(ow-iw)/2:(oh-ih)/2",
+        ]
+        vf_parts.extend(self._preview_fade_filters(clip_ref, start, duration, is_audio=False))
 
         def worker():
             v_proc = None
@@ -1179,9 +1255,7 @@ class SimpleEditorPanel(tk.Frame):
                 ffmpeg, _, ffplay = discover_ffmpeg_tools()
                 command = [
                     ffmpeg, "-v", "error", "-ss", f"{start:.3f}", "-i", media.path,
-                    "-t", f"{duration:.3f}", "-an", "-vf",
-                    f"scale={self.PREVIEW_WIDTH}:{self.PREVIEW_HEIGHT}:force_original_aspect_ratio=decrease,"
-                    f"pad={self.PREVIEW_WIDTH}:{self.PREVIEW_HEIGHT}:(ow-iw)/2:(oh-ih)/2",
+                    "-t", f"{duration:.3f}", "-an", "-vf", ",".join(vf_parts),
                     "-r", "15", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
                 ]
                 v_proc = subprocess.Popen(
@@ -1196,9 +1270,10 @@ class SimpleEditorPanel(tk.Frame):
                         af_parts.append(pitch_filter)
                     if abs(volume - 1.0) > 1e-4:
                         af_parts.append(f"volume={volume:.3f}")
+                    af_parts.extend(self._preview_fade_filters(audio_clip, start, duration, is_audio=True))
                     if af_parts:
                         audio_command += ["-af", ",".join(af_parts)]
-                    audio_command += [media.path]
+                    audio_command += [audio_path]
                     self.audio_process = subprocess.Popen(
                         audio_command,
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -1259,6 +1334,7 @@ class SimpleEditorPanel(tk.Frame):
             af_parts.append(pitch_filter)
         if abs(volume - 1.0) > 1e-4:
             af_parts.append(f"volume={volume:.3f}")
+        af_parts.extend(self._preview_fade_filters(clip_ref, start, duration, is_audio=True))
         if af_parts:
             command += ["-af", ",".join(af_parts)]
         command += [media.path]
@@ -1750,8 +1826,12 @@ class SimpleEditorPanel(tk.Frame):
                 if was_timeline and prev_clip is not None:
                     next_pos = prev_clip.timeline_end + 0.01
                     _nt, next_clip = self._clip_at_playhead(next_pos)
-                    if next_clip and next_clip is not prev_clip:
-                        self.playhead_timeline = next_clip.timeline_start
+                    if next_clip and next_clip is not prev_clip and next_clip.timeline_end > next_pos:
+                        self.playhead_timeline = (
+                            max(next_pos, next_clip.timeline_start)
+                            if next_clip.timeline_start < prev_clip.timeline_end - 1e-6
+                            else next_clip.timeline_start
+                        )
                         self.play_from_cursor()
                     else:
                         self._playback_from_timeline = False

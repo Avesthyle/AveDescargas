@@ -216,6 +216,28 @@ class ExportPlanTests(unittest.TestCase):
         plan = build_export_plan(project, "selected", None, "salida.mp3")
         self.assertEqual(plan["inputs"], ["audio.mp3"])
 
+    def test_odd_video_dimensions_are_rounded_to_even_for_libx264(self):
+        odd_media = MediaInfo(path="odd.mp4", duration=5.0, has_video=True, has_audio=False, width=853, height=405, fps=30.0)
+        track = Track("V", "video", clips=[Clip(odd_media, source_out=5)])
+        plan = build_export_plan(EditorProject([track]), "active", None, "salida.mp4")
+        self.assertEqual(plan["width"] % 2, 0)
+        self.assertEqual(plan["height"] % 2, 0)
+
+    def test_split_clip_clears_inner_fades(self):
+        clip = Clip(video_info("v.mp4", duration=10), source_out=10, fade_in=1.5, fade_out=2.0)
+        left, right = split_clip(clip, 5.0)
+        self.assertEqual(left.fade_in, 1.5)
+        self.assertEqual(left.fade_out, 0.0)
+        self.assertEqual(right.fade_in, 0.0)
+        self.assertEqual(right.fade_out, 2.0)
+
+    def test_project_to_dict_preserves_unused_media_library(self):
+        from media_editor import project_to_dict, project_from_dict
+        unused = video_info("unused.mp4", duration=8)
+        payload = project_to_dict(EditorProject([Track("V1", "video")]), media_library=[unused])
+        _proj, _heights, media_list = project_from_dict(payload)
+        self.assertEqual([m.path for m in media_list], ["unused.mp4"])
+
 
 if __name__ == "__main__":
     unittest.main()
