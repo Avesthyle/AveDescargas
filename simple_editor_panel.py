@@ -149,7 +149,13 @@ class SimpleEditorPanel(tk.Frame):
                     self.after_cancel(after_id)
                 except (AttributeError, tk.TclError, ValueError):
                     pass
+                setattr(self, timer, None)
         self.stop_playback()
+        self.preview_photo = None
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            pass
         super().destroy()
 
     def _button(self, parent, text, command, color=PANEL2, width=None, side="left", padx=3):
@@ -845,11 +851,10 @@ class SimpleEditorPanel(tk.Frame):
         if not clip:
             return
         track = self._track_of(clip)
-        if not track or not clip.media.has_video or not clip.media.has_audio:
-            self.status.configure(text="Selecciona un vídeo con audio para separarlo o desvincularlo.", fg=YELLOW)
+        if not track:
             return
-        self._push_undo()
         if clip.link_group:
+            self._push_undo()
             linked = [other for item in self.project.tracks for other in item.clips if other.link_group == clip.link_group]
             for other in linked:
                 other.link_group = None
@@ -857,15 +862,22 @@ class SimpleEditorPanel(tk.Frame):
             self._update_inspector()
             self.redraw_timeline()
             return
+        if not clip.media.has_video or not clip.media.has_audio:
+            self.status.configure(text="Selecciona un vídeo con audio para separarlo o desvincularlo.", fg=YELLOW)
+            return
+        self._push_undo()
         if not clip.use_source_audio:
+            clip_key = os.path.normcase(os.path.abspath(clip.media.path))
             for item in self.project.tracks:
                 if item.kind != "audio":
                     continue
                 for other in item.clips:
+                    other_key = os.path.normcase(os.path.abspath(other.media.path))
                     if (
                         not other.link_group
-                        and other.media.path == clip.media.path
+                        and other_key == clip_key
                         and abs(other.timeline_start - clip.timeline_start) < 0.02
+                        and abs(other.source_in - clip.source_in) < 0.02
                         and abs(other.duration - clip.duration) < 0.02
                     ):
                         link_id = "link-" + str(id(clip))
@@ -962,11 +974,11 @@ class SimpleEditorPanel(tk.Frame):
         self.inspector_audio_btn.configure(text="Audio original ON" if audio_on else "Audio original OFF")
         self.unlink_btn.configure(text="Desvincular audio/vídeo" if clip.link_group else "Separar audio/vídeo")
 
-    @staticmethod
-    def _clone_for_clipboard(clip):
+    def _clone_for_clipboard(self, clip):
         cloned = copy.deepcopy(clip)
         if clip.link_group and clip.media.has_audio and not clip.use_source_audio:
-            cloned.use_source_audio = True
+            linked_audio = [o for o in self._linked_clips(clip) if o.media.has_audio]
+            cloned.use_source_audio = linked_audio[0].use_source_audio if linked_audio else True
         cloned.link_group = None
         return cloned
 
@@ -1058,6 +1070,12 @@ class SimpleEditorPanel(tk.Frame):
             key = os.path.normcase(os.path.abspath(media.path))
             if key not in by_path or (media.has_video and not by_path[key].has_video):
                 by_path[key] = media
+        for track in self.project.tracks:
+            for clip in track.clips:
+                key = os.path.normcase(os.path.abspath(clip.media.path))
+                canonical = by_path.get(key)
+                if canonical:
+                    clip.media = canonical if clip.media.has_video else (audio_media_from_video(canonical) if canonical.has_video else canonical)
         unique_media = list(by_path.values())
         self.media_library = unique_media
         self.media_list.delete(0, "end")
@@ -1254,7 +1272,7 @@ class SimpleEditorPanel(tk.Frame):
 
     def request_frame(self, seconds):
         media = self.selected_media
-        if not media or not media.has_video:
+        if not media or not media.has_video or not os.path.isfile(media.path):
             return
         if self._frame_after_id:
             try:
@@ -1263,27 +1281,30 @@ class SimpleEditorPanel(tk.Frame):
                 pass
         self.frame_token += 1
         token = self.frame_token
+        media_path = media.path
+        ui_q = self.ui_queue
+        width, height = self.PREVIEW_WIDTH, self.PREVIEW_HEIGHT
 
         def launch():
             self._frame_after_id = None
             if token != self.frame_token:
                 return
 
-            def worker():
+            def worker(path=media_path, tok=token, q=ui_q, w=width, h=height, sec=seconds):
                 try:
                     ffmpeg = discover_ffmpeg_tools()[0]
                 except Exception:
                     return
                 command = [
-                    ffmpeg, "-v", "error", "-ss", f"{seconds:.3f}", "-i", media.path,
+                    ffmpeg, "-v", "error", "-ss", f"{sec:.3f}", "-i", path,
                     "-frames:v", "1", "-vf",
-                    f"scale={self.PREVIEW_WIDTH}:{self.PREVIEW_HEIGHT}:force_original_aspect_ratio=decrease,"
-                    f"pad={self.PREVIEW_WIDTH}:{self.PREVIEW_HEIGHT}:(ow-iw)/2:(oh-ih)/2",
+                    f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                    f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
                     "-f", "image2pipe", "-vcodec", "png", "pipe:1",
                 ]
                 result = subprocess.run(command, capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 if result.returncode == 0 and result.stdout:
-                    self.ui_queue.put(("frame", token, result.stdout))
+                    q.put(("frame", tok, result.stdout))
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -1574,14 +1595,18 @@ class SimpleEditorPanel(tk.Frame):
     def _request_waveform(self, path):
         if path in self.waveform_cache or path in self.waveform_pending:
             return
+        if not os.path.isfile(path):
+            self.waveform_cache[path] = []
+            return
         self.waveform_pending.add(path)
+        ui_q = self.ui_queue
 
-        def worker():
+        def worker(media_path=path, q=ui_q):
             try:
-                samples = waveform_samples(path, 640)
+                samples = waveform_samples(media_path, 640)
             except Exception:
                 samples = []
-            self.ui_queue.put(("waveform", path, samples))
+            q.put(("waveform", media_path, samples))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1852,11 +1877,16 @@ class SimpleEditorPanel(tk.Frame):
             new_start = constrained
         delta = new_start - old_start
         linked = self._linked_clips(clip)
+        main_groups = {c.link_group for c in self._main_track().clips if c.link_group} if free_move and self._main_track() else set()
         for other in linked:
             other_track = self._track_of(other)
             if not other_track:
                 continue
-            ranges = [(item.timeline_start, item.timeline_end) for item in other_track.clips if item is not other and item not in linked]
+            ranges = [
+                (item.timeline_start, item.timeline_end)
+                for item in other_track.clips
+                if item is not other and item not in linked and not (free_move and item.link_group in main_groups)
+            ]
             wanted = other.timeline_start + delta
             if wanted < -1e-6 or abs(avoid_clip_overlap(wanted, other.duration, ranges) - wanted) > 1e-6:
                 self.status.configure(text="El audio vinculado chocaría con otro clip; desvincúlalo para moverlo por separado.", fg=YELLOW)

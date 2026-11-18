@@ -4,6 +4,7 @@ Se saltan automáticamente si no hay pantalla disponible. En Linux se pueden
 ejecutar con:  xvfb-run -a python -m unittest test_editor_panel_gui
 """
 
+import gc
 import os
 import shutil
 import subprocess
@@ -45,7 +46,13 @@ class EditorPanelGuiTests(unittest.TestCase):
 
     def tearDown(self):
         self.panel.destroy()
+        self.panel = None
+        self.video = None
+        self.audio = None
+        self.canvas = None
+        gc.collect()
         self.root.destroy()
+        self.root = None
 
     # -- utilidades --------------------------------------------------------
     def pump(self):
@@ -629,6 +636,57 @@ class EditorEndToEndTests(unittest.TestCase):
             self.assertEqual(called, [])
         finally:
             panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
+    def test_unlink_from_audio_clip_and_clipboard_preserves_muted_linked_audio(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            v_media = MediaInfo(path="av.mp4", duration=10.0, has_video=True, has_audio=True, width=320, height=180, fps=30.0)
+            v_clip = Clip(v_media, source_out=4.0, timeline_start=0.0)
+            panel.project.tracks[0].clips.append(v_clip)
+            panel.selected_clip = v_clip
+            panel.toggle_linked_media()
+            a_clip = panel.project.tracks[1].clips[0]
+            panel.toggle_clip_audio()  # mutes linked audio
+            cloned = panel._clone_for_clipboard(v_clip)
+            self.assertFalse(cloned.use_source_audio)
+            panel.selected_clip = a_clip
+            panel.toggle_linked_media()  # unlink from audio side
+            self.assertIsNone(v_clip.link_group)
+            self.assertIsNone(a_clip.link_group)
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
+    def test_magnetic_main_allows_reordering_clips_with_linked_audio(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            v_track, a_track = panel.project.tracks
+            v_media = MediaInfo(path="av.mp4", duration=10.0, has_video=True, has_audio=True, width=320, height=180, fps=30.0)
+            a_media = audio_media_from_video(v_media)
+            c1 = Clip(v_media, source_out=3.0, timeline_start=0.0, use_source_audio=False, link_group="g1")
+            c2 = Clip(v_media, source_out=3.0, timeline_start=3.0, use_source_audio=False, link_group="g2")
+            a1 = Clip(a_media, source_out=3.0, timeline_start=0.0, link_group="g1")
+            a2 = Clip(a_media, source_out=3.0, timeline_start=3.0, link_group="g2")
+            v_track.clips = [c1, c2]
+            a_track.clips = [a1, a2]
+            panel.magnetic_main.set(True)
+            panel.drag_clip = c1
+            panel.drag_offset = 0.0
+            panel._move_drag(v_track, panel._x_at_time(4.0), panel._layout()[0][0] + 10, alt=True)
+            self.assertGreater(c1.timeline_start, 2.5)
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
             root.destroy()
 
 
