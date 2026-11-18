@@ -365,6 +365,38 @@ class EditorPanelGuiTests(unittest.TestCase):
         self.assertEqual(len(self.audio.clips), 1)
         self.assertIsNotNone(vclip.link_group)
 
+    def test_duplicate_separated_video_restores_source_audio_on_copy(self):
+        media = MediaInfo(path="av.mp4", duration=10.0, has_video=True, has_audio=True, width=640, height=360, fps=25.0)
+        vclip = self.add(self.video, 0.0, 5.0, media)
+        self.panel.selected_clip = vclip
+        self.panel.toggle_linked_media()
+        self.assertFalse(vclip.use_source_audio)
+        self.panel.duplicate_clip()
+        self.assertEqual(len(self.video.clips), 2)
+        self.assertTrue(self.video.clips[1].use_source_audio)
+
+    def test_split_at_playhead_without_selection_splits_linked_audio(self):
+        media = MediaInfo(path="av.mp4", duration=10.0, has_video=True, has_audio=True, width=640, height=360, fps=25.0)
+        vclip = self.add(self.video, 0.0, 6.0, media)
+        self.panel.selected_clip = vclip
+        self.panel.toggle_linked_media()
+        self.panel.selected_clip = None
+        self.panel.project.selected_track_index = 0
+        self.panel.playhead_timeline = 3.0
+        self.panel.split_at_playhead()
+        self.assertEqual(len(self.video.clips), 2)
+        self.assertEqual(len(self.audio.clips), 2)
+
+    def test_magnetic_main_left_trim_does_not_collapse_clip(self):
+        c1 = self.add(self.video, 0.0, 6.0, fake_media(path="c1.mp4", duration=10.0, video=True))
+        self.panel.magnetic_main.set(True)
+        self.panel.drag_clip = c1
+        self.panel.resize_side = "left"
+        self.panel._trim_drag(self.video, self.x_at(2.0), alt=True)
+        self.assertAlmostEqual(self.video.clips[0].duration, 4.0)
+        self.panel._trim_drag(self.video, self.x_at(2.0), alt=True)
+        self.assertAlmostEqual(self.video.clips[0].duration, 4.0)
+
 
 @unittest.skipUnless(HAS_DISPLAY and shutil.which("ffmpeg") and shutil.which("ffprobe"), "Necesita pantalla y FFmpeg")
 class EditorEndToEndTests(unittest.TestCase):

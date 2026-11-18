@@ -338,7 +338,6 @@ class SimpleEditorPanel(tk.Frame):
         canvas_box.rowconfigure(0, weight=1)
         canvas_box.columnconfigure(0, weight=1)
         self.timeline.bind("<ButtonPress-1>", self._timeline_press)
-        self.timeline.bind("<ButtonPress-1>", self._timeline_playhead_press, add="+")
         self.timeline.bind("<B1-Motion>", self._timeline_drag)
         self.timeline.bind("<ButtonRelease-1>", self._timeline_release)
         self.timeline.bind("<Button-2>", self._temporary_razor_press)
@@ -587,7 +586,11 @@ class SimpleEditorPanel(tk.Frame):
         else:
             track = self.project.selected_track()
             if track:
-                targets = [clip for clip in track.clips if clip.timeline_start < time_point < clip.timeline_end]
+                for clip in track.clips:
+                    if clip.timeline_start < time_point < clip.timeline_end:
+                        for item in [clip] + self._linked_clips(clip):
+                            if item not in targets:
+                                targets.append(item)
         targets = [clip for clip in targets if split_clip(clip, time_point) is not None]
         if not targets:
             self.status.configure(text="Coloca el cabezal dentro de un clip para dividirlo (S).", fg=YELLOW)
@@ -887,12 +890,19 @@ class SimpleEditorPanel(tk.Frame):
         self.inspector_audio_btn.configure(text="Audio original ON" if clip.use_source_audio else "Audio original OFF")
         self.unlink_btn.configure(text="Desvincular audio/vídeo" if clip.link_group else "Separar audio/vídeo")
 
+    @staticmethod
+    def _clone_for_clipboard(clip):
+        cloned = copy.deepcopy(clip)
+        if clip.link_group and clip.media.has_audio and not clip.use_source_audio:
+            cloned.use_source_audio = True
+        cloned.link_group = None
+        return cloned
+
     def copy_clip(self):
         if not self.selected_clip:
             self.status.configure(text="Selecciona un clip para copiar (Ctrl+C).", fg=YELLOW)
             return
-        self.clipboard_clip = copy.deepcopy(self.selected_clip)
-        self.clipboard_clip.link_group = None
+        self.clipboard_clip = self._clone_for_clipboard(self.selected_clip)
         self.status.configure(text=f"Copiado: {self.clipboard_clip.name}", fg=GREEN)
 
     def paste_clip(self, at_time=None, target_track=None):
@@ -928,8 +938,7 @@ class SimpleEditorPanel(tk.Frame):
         track = self._track_of(self.selected_clip)
         if not track:
             return
-        self.clipboard_clip = copy.deepcopy(self.selected_clip)
-        self.clipboard_clip.link_group = None
+        self.clipboard_clip = self._clone_for_clipboard(self.selected_clip)
         self.paste_clip(at_time=self.selected_clip.timeline_end, target_track=track)
 
     def _step_frames(self, count):
@@ -1653,14 +1662,13 @@ class SimpleEditorPanel(tk.Frame):
         is_magnetic_main = self.magnetic_main.get() and track is self._main_track()
         if self.resize_side == "left":
             boundary = self._snap_edge(clip, self._time_at_x(x), alt)
-            if not is_magnetic_main:
-                neighbors = [item.timeline_end for item in track.clips if item is not clip and item.timeline_end <= clip.timeline_start + 0.001]
-                for other in linked:
-                    other_track = self._track_of(other)
-                    if other_track:
-                        neighbors.extend(item.timeline_end for item in other_track.clips if item is not other and item.timeline_end <= other.timeline_start + 0.001)
-                if neighbors:
-                    boundary = max(boundary, max(neighbors))
+            neighbors = [item.timeline_end for item in track.clips if item is not clip and item.timeline_end <= clip.timeline_start + 0.001]
+            for other in linked:
+                other_track = self._track_of(other)
+                if other_track:
+                    neighbors.extend(item.timeline_end for item in other_track.clips if item is not other and item.timeline_end <= other.timeline_start + 0.001)
+            if neighbors:
+                boundary = max(boundary, max(neighbors))
             updated = resize_clip_left(clip, boundary)
             self._replace_clip(track, clip, updated)
             for other in linked:
@@ -1679,8 +1687,8 @@ class SimpleEditorPanel(tk.Frame):
             self._replace_clip(track, clip, updated)
             for other in linked:
                 self._replace_linked(other, resize_clip_right(other, updated.timeline_end))
-        if is_magnetic_main:
-            self._apply_magnetic()
+            if is_magnetic_main:
+                self._apply_magnetic()
         if self.snap_target is not None:
             self.snap_label = f"{self.snap_label}  ·  duración {format_editor_time(self.drag_clip.duration)}"
 
@@ -1837,6 +1845,12 @@ class SimpleEditorPanel(tk.Frame):
         threading.Thread(target=worker, daemon=True).start()
 
     def _poll_queue(self):
+        if getattr(self, "_poll_after_id", None):
+            try:
+                self.after_cancel(self._poll_after_id)
+            except (tk.TclError, ValueError):
+                pass
+            self._poll_after_id = None
         while True:
             try:
                 event = self.ui_queue.get_nowait()
@@ -1908,5 +1922,6 @@ class SimpleEditorPanel(tk.Frame):
                 self.playhead_timeline = clip.timeline_start + self.cursor_time - clip.source_in
                 self._update_timecode()
                 self.redraw_timeline()
-        self._poll_after_id = self.after(60, self._poll_queue)
+        if self.winfo_exists():
+            self._poll_after_id = self.after(60, self._poll_queue)
 
