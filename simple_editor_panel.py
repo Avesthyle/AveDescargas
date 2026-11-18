@@ -1409,24 +1409,41 @@ class SimpleEditorPanel(tk.Frame):
             self.status.configure(text="Selecciona un clip para recortarlo hasta el cabezal ([ / ]).", fg=YELLOW)
             return
         target = self.playhead_timeline
+        linked = self._linked_clips(clip)
         if side == "left":
             if target <= clip.timeline_start + 1e-6 or target >= clip.timeline_end - MIN_CLIP_DURATION:
                 self.status.configure(text="Coloca el cabezal dentro del clip para recortar su inicio ([).", fg=YELLOW)
                 return
             self._push_undo()
             updated = resize_clip_left(clip, target)
-            self._replace_clip(track, clip, updated)
-            for other in self._linked_clips(updated):
-                self._replace_linked(other, resize_clip_left(other, updated.timeline_start))
+            if linked:
+                new_linked = [resize_clip_left(other, updated.timeline_start) for other in linked]
+                shared_start = min([updated.timeline_start] + [o.timeline_start for o in new_linked])
+                if abs(shared_start - updated.timeline_start) > 1e-6:
+                    updated = resize_clip_left(clip, shared_start)
+                    new_linked = [resize_clip_left(other, updated.timeline_start) for other in linked]
+                self._replace_clip(track, clip, updated)
+                for other, new_other in zip(linked, new_linked):
+                    self._replace_linked(other, new_other)
+            else:
+                self._replace_clip(track, clip, updated)
         else:
             if target >= clip.timeline_end - 1e-6 or target <= clip.timeline_start + MIN_CLIP_DURATION:
                 self.status.configure(text="Coloca el cabezal dentro del clip para recortar su final (]).", fg=YELLOW)
                 return
             self._push_undo()
             updated = resize_clip_right(clip, target)
-            self._replace_clip(track, clip, updated)
-            for other in self._linked_clips(updated):
-                self._replace_linked(other, resize_clip_right(other, updated.timeline_end))
+            if linked:
+                new_linked = [resize_clip_right(other, updated.timeline_end) for other in linked]
+                shared_end = max([updated.timeline_end] + [o.timeline_end for o in new_linked])
+                if abs(shared_end - updated.timeline_end) > 1e-6:
+                    updated = resize_clip_right(clip, shared_end)
+                    new_linked = [resize_clip_right(other, updated.timeline_end) for other in linked]
+                self._replace_clip(track, clip, updated)
+                for other, new_other in zip(linked, new_linked):
+                    self._replace_linked(other, new_other)
+            else:
+                self._replace_clip(track, clip, updated)
         self.selected_clip = updated
         self._sync_selection_marks(updated)
         self._apply_magnetic()
@@ -2249,9 +2266,10 @@ class SimpleEditorPanel(tk.Frame):
             updated = resize_clip_left(clip, boundary)
             if linked:
                 new_linked = [resize_clip_left(other, updated.timeline_start) for other in linked]
-                max_start = max([updated.timeline_start] + [o.timeline_start for o in new_linked])
-                if abs(max_start - updated.timeline_start) > 1e-6:
-                    updated = resize_clip_left(clip, max_start)
+                starts = [updated.timeline_start] + [o.timeline_start for o in new_linked]
+                shared_start = min(starts) if boundary >= clip.timeline_start else max(starts)
+                if abs(shared_start - updated.timeline_start) > 1e-6:
+                    updated = resize_clip_left(clip, shared_start)
                     new_linked = [resize_clip_left(other, updated.timeline_start) for other in linked]
                 self._replace_clip(track, clip, updated)
                 for other, new_other in zip(linked, new_linked):
@@ -2284,9 +2302,10 @@ class SimpleEditorPanel(tk.Frame):
             updated = resize_clip_right(clip, boundary)
             if linked:
                 new_linked = [resize_clip_right(other, updated.timeline_end) for other in linked]
-                min_end = min([updated.timeline_end] + [o.timeline_end for o in new_linked])
-                if abs(min_end - updated.timeline_end) > 1e-6:
-                    updated = resize_clip_right(clip, min_end)
+                ends = [updated.timeline_end] + [o.timeline_end for o in new_linked]
+                shared_end = max(ends) if boundary <= clip.timeline_end else min(ends)
+                if abs(shared_end - updated.timeline_end) > 1e-6:
+                    updated = resize_clip_right(clip, shared_end)
                     new_linked = [resize_clip_right(other, updated.timeline_end) for other in linked]
                 self._replace_clip(track, clip, updated)
                 for other, new_other in zip(linked, new_linked):
@@ -2527,13 +2546,15 @@ class SimpleEditorPanel(tk.Frame):
         threading.Thread(target=worker, daemon=True).start()
 
     def _poll_queue(self):
+        if getattr(self, "_destroyed", False):
+            return
         if getattr(self, "_poll_after_id", None):
             try:
                 self.after_cancel(self._poll_after_id)
             except (tk.TclError, ValueError):
                 pass
             self._poll_after_id = None
-        while True:
+        while not getattr(self, "_destroyed", False):
             try:
                 event = self.ui_queue.get_nowait()
             except queue.Empty:
@@ -2596,7 +2617,7 @@ class SimpleEditorPanel(tk.Frame):
                 self.export_btn.configure(state="normal", text="Exportar")
                 self.status.configure(text="Error de exportación.", fg=RED)
                 messagebox.showerror("Error", event[1])
-        if self.playing and self.playback_started_at is not None:
+        if not getattr(self, "_destroyed", False) and self.playing and self.playback_started_at is not None:
             elapsed = time.monotonic() - self.playback_started_at
             self.cursor_time = min(self.playback_end_time, self.playback_start_time + elapsed)
             clip = self.selected_clip
@@ -2605,6 +2626,6 @@ class SimpleEditorPanel(tk.Frame):
                 self._update_timecode()
                 self.redraw_timeline()
                 self._ensure_playhead_visible()
-        if self.winfo_exists():
+        if not getattr(self, "_destroyed", False) and self.winfo_exists():
             self._poll_after_id = self.after(60, self._poll_queue)
 

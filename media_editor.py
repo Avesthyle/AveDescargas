@@ -642,27 +642,34 @@ def build_export_plan(
         current_video = "vbase"
         layer_number = 0
         for track in reversed(video_tracks):
+            is_upper_overlay = track is not video_tracks[-1]
             for clip in sorted(track.clips, key=lambda item: item.timeline_start):
                 if not clip.media.has_video:
                     continue
                 index = input_map[id(clip)]
                 prepared = f"vclip{layer_number}"
                 output = f"vlayer{layer_number}"
+                d_in, d_out = clamp_fades(clip.fade_in, clip.fade_out, clip.duration)
+                alpha_fade = is_upper_overlay and (d_in > 0 or d_out > 0)
                 v_filters = [
                     f"[{index}:v]trim=start={_number(clip.source_in)}:end={_number(clip.source_out)}",
                     "setpts=PTS-STARTPTS",
                     f"fps={_number(fps)}",
                 ]
-                d_in, d_out = clamp_fades(clip.fade_in, clip.fade_out, clip.duration)
+                if alpha_fade:
+                    v_filters.append("format=yuva420p")
                 if d_in > 0:
-                    v_filters.append(f"fade=t=in:st=0:d={_number(d_in)}")
+                    suffix = ":alpha=1" if alpha_fade else ""
+                    v_filters.append(f"fade=t=in:st=0:d={_number(d_in)}{suffix}")
                 if d_out > 0:
                     st_out = max(0.0, clip.duration - d_out)
-                    v_filters.append(f"fade=t=out:st={_number(st_out)}:d={_number(d_out)}")
+                    suffix = ":alpha=1" if alpha_fade else ""
+                    v_filters.append(f"fade=t=out:st={_number(st_out)}:d={_number(d_out)}{suffix}")
+                pad_color = ":color=black@0" if alpha_fade else ""
                 v_filters.extend([
                     f"setpts=PTS+{_number(clip.timeline_start)}/TB",
                     f"scale={width}:{height}:force_original_aspect_ratio=decrease",
-                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2{pad_color}",
                     f"setsar=1[{prepared}]",
                 ])
                 filter_parts.append(",".join(v_filters))
@@ -800,6 +807,12 @@ def run_export(plan: dict, progress_callback: Optional[Callable[[str], None]] = 
                 progress_callback(line)
         code = process.wait()
     finally:
+        if process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=3)
+            except Exception:
+                pass
         if process.stdout:
             process.stdout.close()
     if code:

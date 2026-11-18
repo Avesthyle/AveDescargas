@@ -1629,7 +1629,12 @@ class MediaGrabberApp:
                         self.log_to_terminal(f"🧹 Limpieza: Se eliminaron {deleted} archivos temporales.", "normal")
 
         # Repeat check every 100ms
-        self._queue_after_id = self.root.after(100, self.check_queue)
+        winfo_exists = getattr(self.root, "winfo_exists", None)
+        if not callable(winfo_exists) or winfo_exists():
+            try:
+                self._queue_after_id = self.root.after(100, self.check_queue)
+            except tk.TclError:
+                pass
 
 
 if __name__ == "__main__":

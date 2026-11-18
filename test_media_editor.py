@@ -338,6 +338,29 @@ class ExportPlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             project_from_dict({"media": [], "tracks": [{"name": "V1", "kind": "video", "clips": [{"media_idx": 3, "source_in": 0, "source_out": 1, "timeline_start": 0}]}]})
 
+    def test_upper_overlay_track_fades_use_alpha_and_run_export_cleans_aborted_process(self):
+        from media_editor import run_export
+        top = Track("Superior", "video", clips=[Clip(video_info("top.mp4"), source_out=5, fade_in=1.0)])
+        bottom = Track("Inferior", "video", clips=[Clip(video_info("bottom.mp4"), source_out=5, fade_in=1.0)])
+        plan = build_export_plan(EditorProject([top, bottom]), "active", None, "salida.mp4")
+        fc = plan["filter_complex"]
+        self.assertIn("format=yuva420p,fade=t=in:st=0:d=1:alpha=1", fc)
+        self.assertIn(":color=black@0", fc)
+
+        fake_proc = type("Proc", (), {})()
+        terminated = []
+        fake_proc.stdout = type("Stdout", (), {
+            "__iter__": lambda self: iter(["time=00:00:01.00\n"]),
+            "close": lambda self: None,
+        })()
+        fake_proc.poll = lambda: None
+        fake_proc.terminate = lambda: terminated.append(True)
+        fake_proc.wait = lambda timeout=None: 0
+        with patch("media_editor.subprocess.Popen", return_value=fake_proc):
+            with self.assertRaises(RuntimeError):
+                run_export({"command": ["ffmpeg"], "output_path": "/tmp/out_abort.mp4"}, lambda _l: (_ for _ in ()).throw(RuntimeError("abort")))
+        self.assertEqual(terminated, [True])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1147,6 +1147,38 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_trim_to_playhead_syncs_linked_bounds_and_poll_queue_skips_destroyed(self):
+        root = tk.Tk()
+        root.geometry("900x700+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            v_media = MediaInfo(path="v.mp4", duration=10.0, has_video=True, has_audio=True, width=640, height=360, fps=30.0)
+            a_media = audio_media_from_video(v_media)
+            v_clip = Clip(v_media, source_in=0.0, source_out=6.0, timeline_start=0.0, use_source_audio=False, link_group="g1")
+            # Audio ligeramente más corto al final (5.5s): no puede recortarse por la izquierda más allá de 5.49s
+            a_clip = Clip(a_media, source_in=0.0, source_out=5.5, timeline_start=0.0, link_group="g1")
+            panel.project.tracks[0].clips = [v_clip]
+            panel.project.tracks[1].clips = [a_clip]
+            panel.selected_clip = v_clip
+            panel.playhead_timeline = 5.8
+            panel.trim_to_playhead("left")
+
+            v_trimmed = panel.project.tracks[0].clips[0]
+            a_trimmed = panel.project.tracks[1].clips[0]
+            self.assertAlmostEqual(v_trimmed.timeline_start, a_trimmed.timeline_start, places=3)
+            self.assertAlmostEqual(v_trimmed.timeline_start, 5.49, places=2)
+
+            panel.ui_queue.put(("waveform", "v.mp4", [0.1, 0.2]))
+        finally:
+            panel.destroy()
+            panel._poll_queue()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
