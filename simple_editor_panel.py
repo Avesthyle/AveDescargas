@@ -1383,11 +1383,7 @@ class SimpleEditorPanel(tk.Frame):
             self.selected_clip = None
             self._update_inspector()
             self.redraw_timeline()
-        if self.selected_media.has_video and os.path.isfile(self.selected_media.path):
-            self.request_frame(0.0)
-        elif not self.selected_media.has_video:
-            self.preview_photo = None
-            self.preview.configure(image="", text=f"♫  {pathlib.Path(self.selected_media.path).name}")
+        self._request_clip_or_missing_preview(self.selected_media, 0.0)
         self.status.configure(text="Doble clic o arrastra a un canal para añadirlo a la línea de tiempo.", fg=TEXT)
 
     def _insert_selected_media(self):
@@ -1503,13 +1499,28 @@ class SimpleEditorPanel(tk.Frame):
             else:
                 self._replace_clip(track, clip, updated)
         self.selected_clip = updated
-        self._sync_selection_marks(updated)
         self._apply_magnetic()
+        self.playhead_timeline = updated.timeline_start if side == "left" else updated.timeline_end
+        self.cursor_time = updated.source_in if side == "left" else updated.source_out
+        self._sync_selection_marks(updated)
         self._update_inspector()
         self.redraw_timeline()
-        if updated.media.has_video:
-            self.request_frame(self.cursor_time)
-        self.status.configure(text=f"Clip recortado hasta {format_editor_time(target)}.", fg=GREEN)
+        self._request_clip_or_missing_preview(updated, self.cursor_time)
+        self.status.configure(text=f"Clip recortado hasta {format_editor_time(self.playhead_timeline)}.", fg=GREEN)
+
+    def _request_clip_or_missing_preview(self, clip_or_media, source_time):
+        media = clip_or_media.media if hasattr(clip_or_media, "media") else clip_or_media
+        if not media:
+            return
+        if not media.has_video:
+            self.preview_photo = None
+            self.preview.configure(image="", text=f"♫  {pathlib.Path(media.path).name}")
+            return
+        if os.path.isfile(media.path):
+            self.request_frame(source_time)
+        else:
+            self.preview_photo = None
+            self.preview.configure(image="", text=f"Archivo no encontrado: {pathlib.Path(media.path).name}")
 
     def _refresh_preview_at_playhead(self):
         _t, active = self._clip_at_playhead()
@@ -1518,7 +1529,7 @@ class SimpleEditorPanel(tk.Frame):
             pos = timeline_to_source_time(active, self.playhead_timeline)
             if pos is not None:
                 self.cursor_time = pos
-                self.request_frame(pos)
+                self._request_clip_or_missing_preview(active, pos)
             return
         if active and not active.media.has_video:
             self.selected_media = active.media
@@ -1588,11 +1599,7 @@ class SimpleEditorPanel(tk.Frame):
             self.mark_in, self.mark_out = clip.source_in, clip.source_out
             self.keep_audio.set(self._effective_clip_audio(clip))
             self._update_inspector()
-            if clip.media.has_video:
-                self.request_frame(self.cursor_time)
-            else:
-                self.preview_photo = None
-                self.preview.configure(image="", text=f"♫  {pathlib.Path(clip.media.path).name}")
+            self._request_clip_or_missing_preview(clip, self.cursor_time)
         else:
             self.selected_clip = None
             self._update_inspector()
@@ -2269,11 +2276,7 @@ class SimpleEditorPanel(tk.Frame):
                 self.mark_out = active_clip.source_out
                 self.keep_audio.set(self._effective_clip_audio(active_clip))
                 self.cursor_time = timeline_to_source_time(active_clip, self.playhead_timeline)
-                if active_clip.media.has_video:
-                    self.request_frame(self.cursor_time)
-                else:
-                    self.preview_photo = None
-                    self.preview.configure(image="", text=f"♫  {pathlib.Path(active_clip.media.path).name}")
+                self._request_clip_or_missing_preview(active_clip, self.cursor_time)
             else:
                 self.selected_clip = None
                 self._refresh_preview_at_playhead()
@@ -2298,11 +2301,7 @@ class SimpleEditorPanel(tk.Frame):
         inside = clip.timeline_start <= self.playhead_timeline < clip.timeline_end
         offset = (self.playhead_timeline - clip.timeline_start) if inside else 0.0
         self.cursor_time = clamp_media_time(clip.source_in + offset, clip.media.duration)
-        if clip.media.has_video:
-            self.request_frame(self.cursor_time)
-        else:
-            self.preview_photo = None
-            self.preview.configure(image="", text=f"♫  {pathlib.Path(clip.media.path).name}")
+        self._request_clip_or_missing_preview(clip, self.cursor_time)
         self.resize_side = None
         x1 = self._x_at_time(clip.timeline_start)
         x2 = x1 + max(14, clip.duration * self.zoom)

@@ -36,8 +36,12 @@ def normalize_selection(first: float, second: float, duration: float) -> tuple[f
 def playback_range(cursor: float, mark_in: float, mark_out: float, duration: float, from_mark: bool = False) -> tuple[float, float]:
     """Return transport range, from cursor for Play or from mark-in for Space."""
     total = max(0.0, float(duration))
-    start = clamp_media_time(mark_in if from_mark else cursor, total)
-    end = clamp_media_time(mark_out, total)
+    m_in = clamp_media_time(mark_in, total)
+    m_out = clamp_media_time(mark_out, total)
+    start = m_in if from_mark else clamp_media_time(cursor, total)
+    if m_out > m_in and start >= m_out - 1e-6:
+        start = m_in
+    end = m_out
     if end <= start:
         end = total
     return start, end

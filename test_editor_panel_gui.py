@@ -1544,6 +1544,45 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_trim_to_playhead_magnetic_sync_and_missing_preview_clears_stale_frame(self):
+        root = tk.Tk()
+        root.geometry("1200x800+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                v_path = os.path.join(tmp, "clip.mp4")
+                open(v_path, "wb").close()
+                v_media = MediaInfo(path=v_path, duration=10.0, has_video=True, has_audio=True, width=640, height=360, fps=30.0)
+                clip = Clip(v_media, source_in=0.0, source_out=10.0, timeline_start=0.0)
+                panel.project.tracks[0].clips = [clip]
+                panel.magnetic_main.set(True)
+                panel.selected_clip = clip
+                panel.selected_media = v_media
+                panel.playhead_timeline = 4.0
+
+                # 1. trim_to_playhead("left") con pista magnética compacta a 0.0 y sincroniza cabezal y cursor
+                panel.trim_to_playhead("left")
+                trimmed = panel.selected_clip
+                self.assertAlmostEqual(trimmed.timeline_start, 0.0)
+                self.assertAlmostEqual(trimmed.source_in, 4.0)
+                self.assertAlmostEqual(panel.playhead_timeline, 0.0)
+                self.assertAlmostEqual(panel.cursor_time, 4.0)
+
+                # 2. Al desaparecer el archivo de vídeo en disco, seleccionar/buscar limpia preview_photo
+                os.remove(v_path)
+                panel.preview_photo = object()
+                panel._seek_at_time(1.0)
+                self.assertIsNone(panel.preview_photo)
+                self.assertIn("no encontrado", panel.preview.cget("text"))
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

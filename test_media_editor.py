@@ -471,6 +471,14 @@ class ExportPlanTests(unittest.TestCase):
         proj, _, _ = project_from_dict({"media": [], "tracks": [], "selected_track_index": float("nan")})
         self.assertEqual(proj.selected_track_index, 0)
 
+    def test_playback_range_restarts_at_mark_in_when_cursor_reaches_mark_out(self):
+        # Si el cursor está en el final o después de mark_out dentro de un rango marcado,
+        # debe reiniciar el tramo [mark_in, mark_out] y no desbordar hasta duration.
+        self.assertEqual(playback_range(6.0, 2.0, 6.0, 20.0), (2.0, 6.0))
+        self.assertEqual(playback_range(12.0, 2.0, 6.0, 20.0), (2.0, 6.0))
+        self.assertEqual(playback_range(2.5, 2.0, 6.0, 20.0), (2.5, 6.0))
+        self.assertEqual(playback_range(5.0, 0.0, 0.0, 20.0), (5.0, 20.0))
+
 
 if __name__ == "__main__":
     unittest.main()
