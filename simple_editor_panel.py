@@ -41,6 +41,7 @@ from media_editor import (
     timeline_to_source_time,
     DEFAULT_TRACK_HEIGHTS,
     TRACK_SIZE_PRESETS,
+    clamp_fades,
     clamp_track_height,
     close_gap,
     collect_snap_points,
@@ -131,6 +132,7 @@ class SimpleEditorPanel(tk.Frame):
         self._frame_after_id = None
         self._playback_from_timeline = False
         self._playback_track = None
+        self.exporting = False
         self.export_duration = 0.0
         self.timecode_var = tk.StringVar(value="00:00.00 / 00:00.00")
         self.volume_var = tk.IntVar(value=100)
@@ -177,7 +179,7 @@ class SimpleEditorPanel(tk.Frame):
         toolbar = tk.Frame(self, bg=PANEL, padx=10, pady=7)
         toolbar.pack(fill="x")
         tk.Label(toolbar, text="Editor", bg=PANEL, fg=TEXT, font=("Segoe UI", 15, "bold")).pack(side="left", padx=(0, 12))
-        self._button(toolbar, "Exportar", self.export, GREEN, side="right")
+        self.export_btn = self._button(toolbar, "Exportar", self.export, GREEN, side="right")
         ttk.Combobox(
             toolbar, textvariable=self.export_mode,
             values=["Todos los canales activos", "Solo el canal seleccionado"],
@@ -458,7 +460,7 @@ class SimpleEditorPanel(tk.Frame):
             self.track_heights[track.name] = TRACK_SIZE_PRESETS[preset]
         self.redraw_timeline()
 
-    def set_zoom(self, value, anchor_time=None):
+    def set_zoom(self, value, anchor_time=None, anchor_offset=None):
         old_zoom = self.zoom
         self.zoom = max(2.0, min(400.0, float(value)))
         if anchor_time is None:
@@ -467,7 +469,8 @@ class SimpleEditorPanel(tk.Frame):
         region = self.timeline.cget("scrollregion").split()
         if region and old_zoom != self.zoom:
             total = float(region[2]) or 1.0
-            left = max(0.0, self._x_at_time(anchor_time) - self.timeline.winfo_width() / 2)
+            offset = (self.timeline.winfo_width() / 2) if anchor_offset is None else float(anchor_offset)
+            left = max(0.0, self._x_at_time(anchor_time) - offset)
             self.timeline.xview_moveto(left / total)
         self.status.configure(text=f"Zoom: {self.zoom:.0f} px/s", fg=MUTED)
 
@@ -494,7 +497,7 @@ class SimpleEditorPanel(tk.Frame):
                     self.track_heights[track.name] = new_height
                     self.redraw_timeline()
         elif alt:
-            self.set_zoom(self.zoom * (1.2 if step > 0 else 1 / 1.2), anchor_time=self._time_at_x(x))
+            self.set_zoom(self.zoom * (1.2 if step > 0 else 1 / 1.2), anchor_time=self._time_at_x(x), anchor_offset=event.x)
         elif shift:
             self.timeline.xview_scroll(-step * 3, "units")
         else:
@@ -781,7 +784,30 @@ class SimpleEditorPanel(tk.Frame):
             self._update_inspector()
             self.redraw_timeline()
             return
-        audio_track = next((item for item in self.project.tracks if item.kind == "audio"), None)
+        if not clip.use_source_audio:
+            for item in self.project.tracks:
+                if item.kind != "audio":
+                    continue
+                for other in item.clips:
+                    if (
+                        not other.link_group
+                        and other.media.path == clip.media.path
+                        and abs(other.timeline_start - clip.timeline_start) < 0.02
+                        and abs(other.duration - clip.duration) < 0.02
+                    ):
+                        link_id = "link-" + str(id(clip))
+                        clip.link_group = link_id
+                        other.link_group = link_id
+                        self._update_inspector()
+                        self.status.configure(text="Audio y vídeo vinculados de nuevo.", fg=GREEN)
+                        self.redraw_timeline()
+                        return
+        def _has_overlap(candidate_track):
+            return any(
+                c.timeline_start < clip.timeline_end - 1e-6 and c.timeline_end > clip.timeline_start + 1e-6
+                for c in candidate_track.clips
+            )
+        audio_track = next((item for item in self.project.tracks if item.kind == "audio" and not _has_overlap(item)), None)
         if not audio_track:
             audio_track = self.add_track("audio", record_undo=False)
         audio_media = audio_media_from_video(clip.media)
@@ -907,8 +933,9 @@ class SimpleEditorPanel(tk.Frame):
         self.paste_clip(at_time=self.selected_clip.timeline_end, target_track=track)
 
     def _step_frames(self, count):
-        clip = self._clip_at_playhead()
-        fps = clip.media.fps if clip and clip.media.fps > 0 else 30.0
+        _track, clip = self._clip_at_playhead()
+        ref = clip or self.selected_clip
+        fps = ref.media.fps if ref and ref.media.fps > 0 else (self.selected_media.fps if self.selected_media and self.selected_media.fps > 0 else 30.0)
         self._move_playhead(max(0.0, self.playhead_timeline + count / fps))
 
     def save_project_dialog(self):
@@ -1180,16 +1207,15 @@ class SimpleEditorPanel(tk.Frame):
             return []
         filters = []
         prefix = "afade" if is_audio else "fade"
-        if clip_ref.fade_in > 0:
-            d_in = min(clip_ref.fade_in, clip_ref.duration)
+        d_in, d_out = clamp_fades(clip_ref.fade_in, clip_ref.fade_out, clip_ref.duration)
+        if d_in > 0:
             fade_in_end = clip_ref.source_in + d_in
             if start < fade_in_end - 1e-4:
                 st_in = max(0.0, clip_ref.source_in - start)
                 rem_in = min(duration, fade_in_end - max(start, clip_ref.source_in))
                 if rem_in > 0.01:
                     filters.append(f"{prefix}=t=in:st={st_in:.3f}:d={rem_in:.3f}")
-        if clip_ref.fade_out > 0:
-            d_out = min(clip_ref.fade_out, clip_ref.duration)
+        if d_out > 0:
             fade_out_start = clip_ref.source_out - d_out
             if start + duration > fade_out_start + 1e-4:
                 st_out = max(0.0, fade_out_start - start)
@@ -1567,11 +1593,19 @@ class SimpleEditorPanel(tk.Frame):
                 self.project.selected_track_index = self.project.tracks.index(track)
                 self._refresh_tracks()
             _t, active_clip = self._clip_at_playhead()
-            if active_clip and active_clip.media.has_video:
+            if active_clip:
                 self.selected_clip = active_clip
                 self.selected_media = active_clip.media
+                self.mark_in = active_clip.source_in
+                self.mark_out = active_clip.source_out
+                self.keep_audio.set(active_clip.use_source_audio)
                 self.cursor_time = timeline_to_source_time(active_clip, self.playhead_timeline)
-                self.request_frame(self.cursor_time)
+                if active_clip.media.has_video:
+                    self.request_frame(self.cursor_time)
+            else:
+                self.selected_clip = None
+            self._update_inspector()
+            self.redraw_timeline()
             return
         track, clip = hit
         if self.tool_mode == "razor":
@@ -1616,32 +1650,37 @@ class SimpleEditorPanel(tk.Frame):
     def _trim_drag(self, track, x, alt):
         clip = self.drag_clip
         linked = self._linked_clips(clip)
+        is_magnetic_main = self.magnetic_main.get() and track is self._main_track()
         if self.resize_side == "left":
             boundary = self._snap_edge(clip, self._time_at_x(x), alt)
-            neighbors = [item.timeline_end for item in track.clips if item is not clip and item.timeline_end <= clip.timeline_start + 0.001]
-            for other in linked:
-                other_track = self._track_of(other)
-                if other_track:
-                    neighbors.extend(item.timeline_end for item in other_track.clips if item is not other and item.timeline_end <= other.timeline_start + 0.001)
-            if neighbors:
-                boundary = max(boundary, max(neighbors))
+            if not is_magnetic_main:
+                neighbors = [item.timeline_end for item in track.clips if item is not clip and item.timeline_end <= clip.timeline_start + 0.001]
+                for other in linked:
+                    other_track = self._track_of(other)
+                    if other_track:
+                        neighbors.extend(item.timeline_end for item in other_track.clips if item is not other and item.timeline_end <= other.timeline_start + 0.001)
+                if neighbors:
+                    boundary = max(boundary, max(neighbors))
             updated = resize_clip_left(clip, boundary)
             self._replace_clip(track, clip, updated)
             for other in linked:
                 self._replace_linked(other, resize_clip_left(other, updated.timeline_start))
         else:
             boundary = self._snap_edge(clip, self._time_at_x(x), alt)
-            neighbors = [item.timeline_start for item in track.clips if item is not clip and item.timeline_start >= clip.timeline_end - 0.001]
-            for other in linked:
-                other_track = self._track_of(other)
-                if other_track:
-                    neighbors.extend(item.timeline_start for item in other_track.clips if item is not other and item.timeline_start >= other.timeline_end - 0.001)
-            if neighbors:
-                boundary = min(boundary, min(neighbors))
+            if not is_magnetic_main:
+                neighbors = [item.timeline_start for item in track.clips if item is not clip and item.timeline_start >= clip.timeline_end - 0.001]
+                for other in linked:
+                    other_track = self._track_of(other)
+                    if other_track:
+                        neighbors.extend(item.timeline_start for item in other_track.clips if item is not other and item.timeline_start >= other.timeline_end - 0.001)
+                if neighbors:
+                    boundary = min(boundary, min(neighbors))
             updated = resize_clip_right(clip, boundary)
             self._replace_clip(track, clip, updated)
             for other in linked:
                 self._replace_linked(other, resize_clip_right(other, updated.timeline_end))
+        if is_magnetic_main:
+            self._apply_magnetic()
         if self.snap_target is not None:
             self.snap_label = f"{self.snap_label}  ·  duración {format_editor_time(self.drag_clip.duration)}"
 
@@ -1767,6 +1806,9 @@ class SimpleEditorPanel(tk.Frame):
         return "selected" if self.export_mode.get().startswith("Solo") else "active"
 
     def export(self):
+        if self.exporting:
+            self.status.configure(text="Ya hay una exportación en curso.", fg=YELLOW)
+            return
         tracks = self.project.export_tracks(self._mode_key())
         has_video = any(clip.media.has_video for track in tracks for clip in track.clips)
         default = ".mp4" if has_video else ".mp3"
@@ -1781,6 +1823,8 @@ class SimpleEditorPanel(tk.Frame):
         except Exception as exc:
             messagebox.showerror("No se puede exportar", str(exc))
             return
+        self.exporting = True
+        self.export_btn.configure(state="disabled", text="Exportando…")
         self.export_duration = max(0.01, plan.get("duration", 0.0))
         self.status.configure(text="Exportando… 0%", fg=YELLOW)
 
@@ -1847,9 +1891,13 @@ class SimpleEditorPanel(tk.Frame):
                 else:
                     self.status.configure(text="Exportando montaje…", fg=YELLOW)
             elif kind == "export_done":
+                self.exporting = False
+                self.export_btn.configure(state="normal", text="Exportar")
                 self.status.configure(text=f"Exportado: {event[1]}", fg=GREEN)
                 messagebox.showinfo("Exportación terminada", f"Archivo creado:\n\n{event[1]}")
             elif kind == "error":
+                self.exporting = False
+                self.export_btn.configure(state="normal", text="Exportar")
                 self.status.configure(text="Error de exportación.", fg=RED)
                 messagebox.showerror("Error", event[1])
         if self.playing and self.playback_started_at is not None:

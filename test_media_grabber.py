@@ -57,8 +57,9 @@ class SettingsAndNamingTests(unittest.TestCase):
         self.assertEqual(sanitize_output_name("   ..."), "")
 
     def test_custom_name_changes_template_without_extension(self):
+        folder = r"C:\Descargas"
         target = {"url": "https://example.test/video", "custom_name": "Mi canción"}
-        self.assertEqual(build_output_template(r"C:\Descargas", target), r"C:\Descargas\Mi canción.%(ext)s")
+        self.assertEqual(build_output_template(folder, target), os.path.join(folder, "Mi canción.%(ext)s"))
 
 
 class VideoAudioModeTests(unittest.TestCase):
@@ -216,15 +217,15 @@ class ClipDownloadTests(unittest.TestCase):
 
     def test_clip_filename_does_not_collide_with_full_download(self):
         folder = r"C:\Descargas"
-        full = {"url": "https://www.youtube.com/watch?v=one"}
+        full = {"url": "https://example.test/video"}
         clip = {**full, "section_start": 90, "section_end": 150}
         self.assertEqual(
             build_output_template(folder, full),
-            r"C:\Descargas\%(title).150B [%(id)s].%(ext)s",
+            os.path.join(folder, "%(title).150B [%(id)s].%(ext)s"),
         )
         self.assertEqual(
             build_output_template(folder, clip),
-            r"C:\Descargas\%(title).150B [%(id)s] [fragmento 90-150].%(ext)s",
+            os.path.join(folder, "%(title).150B [%(id)s] [fragmento 90-150].%(ext)s"),
         )
 
 

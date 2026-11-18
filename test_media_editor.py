@@ -238,6 +238,11 @@ class ExportPlanTests(unittest.TestCase):
         _proj, _heights, media_list = project_from_dict(payload)
         self.assertEqual([m.path for m in media_list], ["unused.mp4"])
 
+    def test_resize_clamps_overlapping_fades(self):
+        clip = Clip(video_info("v.mp4", duration=10), source_out=10, fade_in=3.0, fade_out=3.0)
+        shrunk = resize_clip_right(clip, 2.0)
+        self.assertLessEqual(shrunk.fade_in + shrunk.fade_out, shrunk.duration + 1e-6)
+
 
 if __name__ == "__main__":
     unittest.main()

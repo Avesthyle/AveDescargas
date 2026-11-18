@@ -360,13 +360,27 @@ def split_clip(clip: Clip, timeline_time: float) -> Optional[tuple[Clip, Clip]]:
     return left, right
 
 
+def clamp_fades(fade_in: float, fade_out: float, duration: float) -> tuple[float, float]:
+    """Limita fade_in y fade_out a la duración del clip evitando que se solapen."""
+    dur = max(0.0, float(duration))
+    f_in = max(0.0, min(dur, float(fade_in)))
+    f_out = max(0.0, min(dur, float(fade_out)))
+    total = f_in + f_out
+    if total > dur > 0:
+        scale = dur / total
+        f_in = round(f_in * scale, 3)
+        f_out = round(f_out * scale, 3)
+    return f_in, f_out
+
+
 def resize_clip_left(clip: Clip, timeline_start: float) -> Clip:
     """Mueve el borde izquierdo y permite recuperar material anterior del original."""
     requested_start = max(0.0, float(timeline_start))
     source_in = clip.source_in + (requested_start - clip.timeline_start)
     source_in = max(0.0, min(source_in, clip.source_out - MIN_CLIP_DURATION))
     actual_start = clip.timeline_start + (source_in - clip.source_in)
-    return replace(clip, source_in=source_in, timeline_start=actual_start)
+    f_in, f_out = clamp_fades(clip.fade_in, clip.fade_out, clip.source_out - source_in)
+    return replace(clip, source_in=source_in, timeline_start=actual_start, fade_in=f_in, fade_out=f_out)
 
 
 def resize_clip_right(clip: Clip, timeline_end: float) -> Clip:
@@ -374,7 +388,8 @@ def resize_clip_right(clip: Clip, timeline_end: float) -> Clip:
     requested_end = max(clip.timeline_start + MIN_CLIP_DURATION, float(timeline_end))
     source_out = clip.source_in + (requested_end - clip.timeline_start)
     source_out = max(clip.source_in + MIN_CLIP_DURATION, min(source_out, clip.media.duration))
-    return replace(clip, source_out=source_out)
+    f_in, f_out = clamp_fades(clip.fade_in, clip.fade_out, source_out - clip.source_in)
+    return replace(clip, source_out=source_out, fade_in=f_in, fade_out=f_out)
 
 
 def unlink_video_audio(video_clip: Clip, audio_clip: Clip) -> tuple[Clip, Clip]:
@@ -601,11 +616,10 @@ def build_export_plan(
                     f"[{index}:v]trim=start={_number(clip.source_in)}:end={_number(clip.source_out)}",
                     "setpts=PTS-STARTPTS",
                 ]
-                if clip.fade_in > 0:
-                    d_in = min(clip.fade_in, clip.duration)
+                d_in, d_out = clamp_fades(clip.fade_in, clip.fade_out, clip.duration)
+                if d_in > 0:
                     v_filters.append(f"fade=t=in:st=0:d={_number(d_in)}")
-                if clip.fade_out > 0:
-                    d_out = min(clip.fade_out, clip.duration)
+                if d_out > 0:
                     st_out = max(0.0, clip.duration - d_out)
                     v_filters.append(f"fade=t=out:st={_number(st_out)}:d={_number(d_out)}")
                 v_filters.extend([
@@ -645,11 +659,10 @@ def build_export_plan(
             a_parts.append(pitch)
         if abs(clip.volume - 1.0) > 1e-4:
             a_parts.append(f"volume={_number(clip.volume)}")
-        if clip.fade_in > 0:
-            d_in = min(clip.fade_in, clip.duration)
+        d_in, d_out = clamp_fades(clip.fade_in, clip.fade_out, clip.duration)
+        if d_in > 0:
             a_parts.append(f"afade=t=in:st=0:d={_number(d_in)}")
-        if clip.fade_out > 0:
-            d_out = min(clip.fade_out, clip.duration)
+        if d_out > 0:
             st_out = max(0.0, clip.duration - d_out)
             a_parts.append(f"afade=t=out:st={_number(st_out)}:d={_number(d_out)}")
         a_parts.extend([

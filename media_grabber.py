@@ -19,7 +19,10 @@ from urllib.parse import parse_qs, urlparse
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import yt_dlp
 from yt_dlp.utils import download_range_func
-from editor_panel import EditorPanel
+try:
+    from simple_editor_panel import SimpleEditorPanel as EditorPanel
+except Exception:
+    from editor_panel import EditorPanel
 
 # --- DWM Immersive Dark Mode for Windows 10/11 ---
 def set_dark_title_bar(window):
@@ -1543,7 +1546,11 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-    root = tk.Tk()
+    try:
+        from tkinterdnd2 import TkinterDnD
+        root = TkinterDnD.Tk()
+    except Exception:
+        root = tk.Tk()
     app = MediaGrabberApp(root)
     root.mainloop()
 

@@ -43,7 +43,7 @@ class EditorPanelGuiTests(unittest.TestCase):
         self.canvas = self.panel.timeline
 
     def tearDown(self):
-        self.panel.stop_playback()
+        self.panel.destroy()
         self.root.destroy()
 
     # -- utilidades --------------------------------------------------------
@@ -337,6 +337,34 @@ class EditorPanelGuiTests(unittest.TestCase):
         self.assertEqual(len(called), 1)
         self.assertGreaterEqual(called[0], 4.0)
 
+    def test_step_frames_works_with_clip_at_playhead(self):
+        self.add(self.video, 0.0, 5.0, fake_media(path="v.mp4", video=True))
+        self.panel.playhead_timeline = 1.0
+        self.panel._step_frames(1)
+        self.assertGreater(self.panel.playhead_timeline, 1.0)
+
+    def test_magnetic_main_allows_expanding_clip_right_and_pushes_next(self):
+        c1 = self.add(self.video, 0.0, 3.0, Clip_media := fake_media(path="c1.mp4", duration=10.0, video=True))
+        c1.source_out = 3.0
+        c2 = self.add(self.video, 3.0, 2.0, Clip_media)
+        self.panel.magnetic_main.set(True)
+        self.panel.drag_clip = c1
+        self.panel.resize_side = "right"
+        self.panel._trim_drag(self.video, self.x_at(5.0), alt=True)
+        self.assertAlmostEqual(self.video.clips[0].duration, 5.0)
+        self.assertAlmostEqual(c2.timeline_start, 5.0)
+
+    def test_separate_audio_again_after_unlink_relinks_without_overlap(self):
+        media = MediaInfo(path="av.mp4", duration=10.0, has_video=True, has_audio=True, width=640, height=360, fps=25.0)
+        vclip = self.add(self.video, 0.0, 5.0, media)
+        self.panel.selected_clip = vclip
+        self.panel.toggle_linked_media()  # separa
+        self.panel.toggle_linked_media()  # desvincula
+        self.assertIsNone(vclip.link_group)
+        self.panel.toggle_linked_media()  # re-vincula sin duplicar
+        self.assertEqual(len(self.audio.clips), 1)
+        self.assertIsNotNone(vclip.link_group)
+
 
 @unittest.skipUnless(HAS_DISPLAY and shutil.which("ffmpeg") and shutil.which("ffprobe"), "Necesita pantalla y FFmpeg")
 class EditorEndToEndTests(unittest.TestCase):
@@ -386,7 +414,7 @@ class EditorEndToEndTests(unittest.TestCase):
             run_export(plan)
             self.assertAlmostEqual(probe_media(output).duration, 8.0, delta=0.3)
         finally:
-            panel.stop_playback()
+            panel.destroy()
             root.destroy()
 
 
