@@ -142,5 +142,46 @@ class TrackLayoutTests(unittest.TestCase):
         self.assertEqual(unique_track_name(["Vídeo 1"], "audio"), "Audio 1")
 
 
+class ProjectAndExportTests(unittest.TestCase):
+    def test_parse_ffmpeg_time(self):
+        from media_editor import parse_ffmpeg_time
+        self.assertAlmostEqual(parse_ffmpeg_time("frame=12 time=00:01:23.45 bitrate=1000kbits/s"), 83.45)
+        self.assertIsNone(parse_ffmpeg_time("frame=12"))
+
+    def test_project_save_load_roundtrip(self):
+        import os
+        import tempfile
+        from media_editor import EditorProject, load_project, save_project
+
+        m = MediaInfo(path="demo.mp4", duration=12.0, has_video=True, has_audio=True, width=1280, height=720, fps=30.0)
+        c = Clip(m, source_in=1.0, source_out=6.0, timeline_start=2.0, volume=1.5, fade_in=0.5, fade_out=0.75)
+        proj = EditorProject(tracks=[Track("Vídeo 1", "video", clips=[c])], selected_track_index=0)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "test.avep")
+            save_project(path, proj, {"Vídeo 1": 80.0})
+            loaded, heights, media_list = load_project(path)
+        self.assertEqual(len(media_list), 1)
+        self.assertEqual(heights["Vídeo 1"], 80.0)
+        lc = loaded.tracks[0].clips[0]
+        self.assertAlmostEqual(lc.volume, 1.5)
+        self.assertAlmostEqual(lc.fade_in, 0.5)
+        self.assertAlmostEqual(lc.fade_out, 0.75)
+
+    def test_export_includes_setsar_and_volume_fades(self):
+        from media_editor import EditorProject, build_export_plan
+
+        m = MediaInfo(path="demo.mp4", duration=10.0, has_video=True, has_audio=True, width=1280, height=720, fps=30.0)
+        c = Clip(m, source_in=0.0, source_out=4.0, timeline_start=0.0, volume=0.5, fade_in=0.5, fade_out=0.5)
+        proj = EditorProject(tracks=[Track("V1", "video", clips=[c])])
+        plan = build_export_plan(proj, "active", None, "out.mp4")
+        fc = plan["filter_complex"]
+        self.assertIn("setsar=1", fc)
+        self.assertIn("aformat=channel_layouts=stereo", fc)
+        self.assertIn("volume=0.5", fc)
+        self.assertIn("fade=t=in", fc)
+        self.assertIn("afade=t=out", fc)
+
+
 if __name__ == "__main__":
     unittest.main()
+

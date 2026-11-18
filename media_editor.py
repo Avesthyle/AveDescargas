@@ -301,12 +301,18 @@ class Clip:
     name: str = ""
     pitch_semitones: int = 0
     link_group: Optional[str] = None
+    volume: float = 1.0
+    fade_in: float = 0.0
+    fade_out: float = 0.0
 
     def __post_init__(self):
         self.source_in = parse_editor_time(self.source_in)
         self.source_out = self.media.duration if self.source_out is None else parse_editor_time(self.source_out)
         self.timeline_start = parse_editor_time(self.timeline_start)
         self.pitch_semitones = int(self.pitch_semitones)
+        self.volume = max(0.0, min(2.0, float(self.volume)))
+        self.fade_in = max(0.0, float(self.fade_in))
+        self.fade_out = max(0.0, float(self.fade_out))
         pitch_factor(self.pitch_semitones)
         if self.source_out <= self.source_in:
             raise ValueError("La salida debe ser posterior a la entrada.")
@@ -587,12 +593,24 @@ def build_export_plan(
                 index = input_map[id(clip)]
                 prepared = f"vclip{layer_number}"
                 output = f"vlayer{layer_number}"
-                filter_parts.append(
-                    f"[{index}:v]trim=start={_number(clip.source_in)}:end={_number(clip.source_out)},"
-                    f"setpts=PTS-STARTPTS+{_number(clip.timeline_start)}/TB,"
-                    f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2[{prepared}]"
-                )
+                v_filters = [
+                    f"[{index}:v]trim=start={_number(clip.source_in)}:end={_number(clip.source_out)}",
+                    "setpts=PTS-STARTPTS",
+                ]
+                if clip.fade_in > 0:
+                    d_in = min(clip.fade_in, clip.duration)
+                    v_filters.append(f"fade=t=in:st=0:d={_number(d_in)}")
+                if clip.fade_out > 0:
+                    d_out = min(clip.fade_out, clip.duration)
+                    st_out = max(0.0, clip.duration - d_out)
+                    v_filters.append(f"fade=t=out:st={_number(st_out)}:d={_number(d_out)}")
+                v_filters.extend([
+                    f"setpts=PTS+{_number(clip.timeline_start)}/TB",
+                    f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+                    f"setsar=1[{prepared}]",
+                ])
+                filter_parts.append(",".join(v_filters))
                 filter_parts.append(
                     f"[{current_video}][{prepared}]overlay=0:0:eof_action=pass:"
                     f"enable='between(t,{_number(clip.timeline_start)},{_number(clip.timeline_end)})'[{output}]"
@@ -614,13 +632,29 @@ def build_export_plan(
         label = f"aclip{audio_number}"
         delay = int(round(clip.timeline_start * 1000))
         pitch = build_pitch_filter(clip.pitch_semitones)
-        pitch_part = f"{pitch}," if pitch else ""
-        filter_parts.append(
-            f"[{index}:a]atrim=start={_number(clip.source_in)}:end={_number(clip.source_out)},"
-            f"asetpts=PTS-STARTPTS,{pitch_part}adelay={delay}|{delay},"
-            f"aresample=async=1:first_pts=0,apad,"
-            f"atrim=duration={_number(duration)}[{label}]"
-        )
+        a_parts = [
+            f"[{index}:a]atrim=start={_number(clip.source_in)}:end={_number(clip.source_out)}",
+            "asetpts=PTS-STARTPTS",
+            "aformat=channel_layouts=stereo",
+        ]
+        if pitch:
+            a_parts.append(pitch)
+        if abs(clip.volume - 1.0) > 1e-4:
+            a_parts.append(f"volume={_number(clip.volume)}")
+        if clip.fade_in > 0:
+            d_in = min(clip.fade_in, clip.duration)
+            a_parts.append(f"afade=t=in:st=0:d={_number(d_in)}")
+        if clip.fade_out > 0:
+            d_out = min(clip.fade_out, clip.duration)
+            st_out = max(0.0, clip.duration - d_out)
+            a_parts.append(f"afade=t=out:st={_number(st_out)}:d={_number(d_out)}")
+        a_parts.extend([
+            f"adelay={delay}|{delay}",
+            "aresample=async=1:first_pts=0",
+            "apad",
+            f"atrim=duration={_number(duration)}[{label}]",
+        ])
+        filter_parts.append(",".join(a_parts))
         audio_labels.append(label)
         audio_number += 1
 
@@ -684,6 +718,16 @@ def build_export_plan(
     }
 
 
+def parse_ffmpeg_time(line: str) -> Optional[float]:
+    """Extrae el tiempo en segundos de una línea de progreso de FFmpeg (time=HH:MM:SS.xx)."""
+    import re
+    match = re.search(r"time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)", line or "")
+    if not match:
+        return None
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
 def run_export(plan: dict, progress_callback: Optional[Callable[[str], None]] = None) -> str:
     os.makedirs(os.path.dirname(plan["output_path"]) or ".", exist_ok=True)
     process = subprocess.Popen(
@@ -692,16 +736,137 @@ def run_export(plan: dict, progress_callback: Optional[Callable[[str], None]] = 
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     tail = []
-    for line in process.stdout or []:
-        line = line.rstrip()
-        tail.append(line)
-        tail = tail[-20:]
-        if progress_callback and ("time=" in line or "error" in line.lower()):
-            progress_callback(line)
-    code = process.wait()
+    try:
+        for line in process.stdout or []:
+            line = line.rstrip()
+            tail.append(line)
+            tail = tail[-20:]
+            if progress_callback and ("time=" in line or "error" in line.lower()):
+                progress_callback(line)
+        code = process.wait()
+    finally:
+        if process.stdout:
+            process.stdout.close()
     if code:
         raise RuntimeError("FFmpeg no pudo exportar:\n" + "\n".join(tail))
     if not os.path.isfile(plan["output_path"]) or os.path.getsize(plan["output_path"]) == 0:
         raise RuntimeError("FFmpeg terminó sin crear un archivo válido.")
     return plan["output_path"]
+
+
+def project_to_dict(project: EditorProject, track_heights: Optional[dict[str, float]] = None) -> dict:
+    """Serializa un EditorProject a un diccionario JSON."""
+    media_list: list[MediaInfo] = []
+    media_index: dict[int, int] = {}
+    for track in project.tracks:
+        for clip in track.clips:
+            if id(clip.media) not in media_index:
+                media_index[id(clip.media)] = len(media_list)
+                media_list.append(clip.media)
+    return {
+        "version": 1,
+        "selected_track_index": project.selected_track_index,
+        "track_heights": dict(track_heights or {}),
+        "media": [
+            {
+                "path": m.path,
+                "duration": m.duration,
+                "has_video": m.has_video,
+                "has_audio": m.has_audio,
+                "width": m.width,
+                "height": m.height,
+                "fps": m.fps,
+                "format_name": m.format_name,
+                "video_codec": m.video_codec,
+                "audio_codec": m.audio_codec,
+            }
+            for m in media_list
+        ],
+        "tracks": [
+            {
+                "name": t.name,
+                "kind": t.kind,
+                "enabled": t.enabled,
+                "muted": t.muted,
+                "clips": [
+                    {
+                        "media_idx": media_index[id(c.media)],
+                        "source_in": c.source_in,
+                        "source_out": c.source_out,
+                        "timeline_start": c.timeline_start,
+                        "use_source_audio": c.use_source_audio,
+                        "name": c.name,
+                        "pitch_semitones": c.pitch_semitones,
+                        "link_group": c.link_group,
+                        "volume": c.volume,
+                        "fade_in": c.fade_in,
+                        "fade_out": c.fade_out,
+                    }
+                    for c in t.clips
+                ],
+            }
+            for t in project.tracks
+        ],
+    }
+
+
+def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list[MediaInfo]]:
+    """Reconstruye (EditorProject, track_heights, media_list) desde un diccionario JSON."""
+    media_list = [
+        MediaInfo(
+            path=m["path"],
+            duration=float(m["duration"]),
+            has_video=bool(m["has_video"]),
+            has_audio=bool(m["has_audio"]),
+            width=int(m.get("width", 0)),
+            height=int(m.get("height", 0)),
+            fps=float(m.get("fps", 0.0)),
+            format_name=str(m.get("format_name", "")),
+            video_codec=m.get("video_codec"),
+            audio_codec=m.get("audio_codec"),
+        )
+        for m in data.get("media", [])
+    ]
+    tracks = []
+    for t in data.get("tracks", []):
+        clips = [
+            Clip(
+                media=media_list[int(c["media_idx"])],
+                source_in=c["source_in"],
+                source_out=c["source_out"],
+                timeline_start=c["timeline_start"],
+                use_source_audio=bool(c.get("use_source_audio", True)),
+                name=str(c.get("name", "")),
+                pitch_semitones=int(c.get("pitch_semitones", 0)),
+                link_group=c.get("link_group"),
+                volume=float(c.get("volume", 1.0)),
+                fade_in=float(c.get("fade_in", 0.0)),
+                fade_out=float(c.get("fade_out", 0.0)),
+            )
+            for c in t.get("clips", [])
+        ]
+        tracks.append(Track(
+            name=t["name"],
+            kind=t["kind"],
+            enabled=bool(t.get("enabled", True)),
+            muted=bool(t.get("muted", False)),
+            clips=clips,
+        ))
+    project = EditorProject(tracks=tracks, selected_track_index=int(data.get("selected_track_index", 0)))
+    heights = {str(k): clamp_track_height(v) for k, v in data.get("track_heights", {}).items()}
+    return project, heights, media_list
+
+
+def save_project(path: str, project: EditorProject, track_heights: Optional[dict[str, float]] = None) -> str:
+    payload = project_to_dict(project, track_heights)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    return path
+
+
+def load_project(path: str) -> tuple[EditorProject, dict[str, float], list[MediaInfo]]:
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    return project_from_dict(data)
+
 

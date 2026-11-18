@@ -273,6 +273,39 @@ class EditorPanelGuiTests(unittest.TestCase):
         names = [track.name for track in self.panel.project.tracks]
         self.assertEqual(len(names), len(set(names)))
 
+    def test_playhead_prioritizes_video_over_audio_track(self):
+        vclip = self.add(self.video, 0, 5, fake_media(path="v.mp4", video=True))
+        self.add(self.audio, 0, 5, fake_media(path="a.mp3", video=False))
+        self.panel.playhead_timeline = 2.0
+        track, clip = self.panel._clip_at_playhead()
+        self.assertIs(track, self.video)
+        self.assertIs(clip, vclip)
+
+    def test_separate_audio_disables_source_audio_and_is_undoable(self):
+        media = MediaInfo(path="av.mp4", duration=10.0, has_video=True, has_audio=True, width=640, height=360, fps=25.0)
+        vclip = self.add(self.video, 0, 5, media)
+        self.panel.selected_clip = vclip
+        self.panel.toggle_linked_media()
+        self.assertFalse(vclip.use_source_audio)
+        self.assertEqual(len(self.audio.clips), 1)
+        self.assertTrue(vclip.link_group)
+        self.panel.undo()
+        self.assertTrue(self.panel.project.tracks[0].clips[0].use_source_audio)
+        self.assertEqual(self.panel.project.tracks[1].clips, [])
+
+    def test_copy_paste_and_duplicate_clip(self):
+        vclip = self.add(self.video, 0, 3)
+        self.panel.selected_clip = vclip
+        self.panel.duplicate_clip()
+        self.assertEqual(len(self.video.clips), 2)
+        self.assertAlmostEqual(self.video.clips[1].timeline_start, 3.0)
+        self.panel.copy_clip()
+        self.panel.playhead_timeline = 8.0
+        self.panel.paste_clip()
+        self.assertEqual(len(self.video.clips), 3)
+        self.assertAlmostEqual(self.video.clips[2].timeline_start, 8.0)
+
+
 
 @unittest.skipUnless(HAS_DISPLAY and shutil.which("ffmpeg") and shutil.which("ffprobe"), "Necesita pantalla y FFmpeg")
 class EditorEndToEndTests(unittest.TestCase):
