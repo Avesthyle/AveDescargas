@@ -411,6 +411,8 @@ class SimpleEditorPanel(tk.Frame):
         self.redraw_timeline()
 
     def undo(self):
+        if self.playing:
+            self.stop_playback()
         if not self.undo_stack:
             self.status.configure(text="No hay nada que deshacer.", fg=MUTED)
             return
@@ -420,6 +422,8 @@ class SimpleEditorPanel(tk.Frame):
         self.status.configure(text="Deshecho (Ctrl+Z). Rehacer con Ctrl+Y.", fg=YELLOW)
 
     def redo(self):
+        if self.playing:
+            self.stop_playback()
         if not self.redo_stack:
             self.status.configure(text="No hay nada que rehacer.", fg=MUTED)
             return
@@ -551,6 +555,33 @@ class SimpleEditorPanel(tk.Frame):
     def _main_track(self):
         return next((track for track in self.project.tracks if track.kind == "video"), None)
 
+    def _shift_linked_clip(self, linked, wanted_start):
+        """Mueve un clip vinculado a wanted_start evitando solapar clips independientes."""
+        wanted = round(max(0.0, float(wanted_start)), 6)
+        current_track = self._track_of(linked)
+        if not current_track:
+            linked.timeline_start = wanted
+            return
+        def _free_in(candidate_track):
+            return not any(
+                other is not linked and other.link_group != linked.link_group
+                and other.timeline_start < wanted + linked.duration - 1e-6
+                and other.timeline_end > wanted + 1e-6
+                for other in candidate_track.clips
+            )
+        if _free_in(current_track):
+            linked.timeline_start = wanted
+            return
+        alt_track = next(
+            (t for t in self.project.tracks if t.kind == current_track.kind and t is not current_track and _free_in(t)),
+            None,
+        )
+        if not alt_track:
+            alt_track = self.add_track(current_track.kind, record_undo=False)
+        current_track.clips.remove(linked)
+        alt_track.clips.append(linked)
+        linked.timeline_start = wanted
+
     def _apply_magnetic(self):
         """Si la pista principal magnética está activa, junta sus clips desde 0 sin huecos."""
         if not self.magnetic_main.get():
@@ -562,7 +593,7 @@ class SimpleEditorPanel(tk.Frame):
         deltas = compact_clips(main.clips)
         for clip_id, delta in deltas.items():
             for linked in self._linked_clips(before[clip_id]):
-                linked.timeline_start = round(max(0.0, linked.timeline_start + delta), 6)
+                self._shift_linked_clip(linked, linked.timeline_start + delta)
 
     def _magnetic_toggled(self):
         if self.magnetic_main.get():
@@ -579,6 +610,8 @@ class SimpleEditorPanel(tk.Frame):
 
     def split_at_playhead(self):
         """Divide en el cabezal el clip seleccionado (o los clips bajo el cabezal en la pista seleccionada)."""
+        if self.playing:
+            self.stop_playback()
         time_point = self.playhead_timeline
         targets = []
         if self.selected_clip and self.selected_clip.timeline_start < time_point < self.selected_clip.timeline_end:
@@ -610,6 +643,8 @@ class SimpleEditorPanel(tk.Frame):
         self.status.configure(text=f"Clip dividido en {format_editor_time(time_point)}.", fg=GREEN)
 
     def ripple_delete_clip(self):
+        if self.playing:
+            self.stop_playback()
         clip = self.selected_clip
         track = self._track_of(clip) if clip else None
         if not track:
@@ -639,7 +674,7 @@ class SimpleEditorPanel(tk.Frame):
         if shift > 0:
             for clip in moved:
                 for linked in self._linked_clips(clip):
-                    linked.timeline_start = round(max(0.0, linked.timeline_start - shift), 6)
+                    self._shift_linked_clip(linked, linked.timeline_start - shift)
         self.redraw_timeline()
         self.status.configure(text=f"Hueco de {format_editor_time(shift)} cerrado en {track.name}.", fg=GREEN)
 
@@ -700,16 +735,24 @@ class SimpleEditorPanel(tk.Frame):
             self.status.configure(text=f"No se pudo cargar el archivo: {exc}", fg=RED)
         return "break"
 
+    def _add_or_get_media(self, path):
+        key = os.path.normcase(os.path.abspath(path))
+        for existing in self.media_library:
+            if os.path.normcase(os.path.abspath(existing.path)) == key:
+                return existing
+        media = probe_media(path)
+        self.media_library.append(media)
+        icon = "▶" if media.has_video else "♫"
+        self.media_list.insert("end", f"{icon}  {pathlib.Path(path).name}   ·   {format_editor_time(media.duration)}")
+        return media
+
     def _ingest_dropped_paths(self, paths, target, event=None):
         accepted = []
         for path in paths:
             if not os.path.isfile(path):
                 continue
             try:
-                media = probe_media(path)
-                self.media_library.append(media)
-                self.media_list.insert("end", f"{'▶' if media.has_video else '♫'}  {pathlib.Path(path).name}   ·   {format_editor_time(media.duration)}")
-                accepted.append(media)
+                accepted.append(self._add_or_get_media(path))
             except Exception as exc:
                 self.status.configure(text=f"No se pudo abrir {pathlib.Path(path).name}: {exc}", fg=RED)
         if not accepted:
@@ -720,7 +763,7 @@ class SimpleEditorPanel(tk.Frame):
             self._drop_library_media(event)
         else:
             self.media_list.selection_clear(0, "end")
-            self.media_list.selection_set(len(self.media_library) - 1)
+            self.media_list.selection_set(self.media_library.index(accepted[-1]))
             self._select_media()
 
     def _refresh_tracks(self):
@@ -981,10 +1024,16 @@ class SimpleEditorPanel(tk.Frame):
         self.selected_media = None
         self.waveform_cache.clear()
         self.waveform_pending.clear()
-        self.media_library = media_list
+        by_path = {}
+        for media in media_list:
+            key = os.path.normcase(os.path.abspath(media.path))
+            if key not in by_path or (media.has_video and not by_path[key].has_video):
+                by_path[key] = media
+        unique_media = list(by_path.values())
+        self.media_library = unique_media
         self.media_list.delete(0, "end")
         missing = []
-        for media in media_list:
+        for media in unique_media:
             exists = os.path.isfile(media.path)
             if not exists:
                 missing.append(media.path)
@@ -1024,10 +1073,18 @@ class SimpleEditorPanel(tk.Frame):
         if 0 <= index < len(self.project.tracks):
             self._push_undo()
             removed = self.project.tracks.pop(index)
+            removed_groups = {c.link_group for c in removed.clips if c.link_group}
+            for track in self.project.tracks:
+                for clip in track.clips:
+                    if clip.link_group in removed_groups and not self._linked_clips(clip):
+                        clip.link_group = None
+                        if clip.media.has_video and clip.media.has_audio:
+                            clip.use_source_audio = True
             self.track_heights.pop(removed.name, None)
             self.project.selected_track_index = max(0, min(index, len(self.project.tracks) - 1))
             self.selected_clip = None
             self._refresh_tracks()
+            self._update_inspector()
             self.redraw_timeline()
 
     def open_media(self):
@@ -1035,17 +1092,15 @@ class SimpleEditorPanel(tk.Frame):
             title="Abrir vídeo o canción",
             filetypes=[("Vídeos y canciones", "*.mp4 *.mov *.mkv *.webm *.avi *.mp3 *.wav *.m4a *.aac *.flac *.ogg"), ("Todos", "*.*")],
         )
+        last_media = None
         for path in paths:
             try:
-                media = probe_media(path)
-                self.media_library.append(media)
-                icon = "▶" if media.has_video else "♫"
-                self.media_list.insert("end", f"{icon}  {pathlib.Path(path).name}   ·   {format_editor_time(media.duration)}")
+                last_media = self._add_or_get_media(path)
             except Exception as exc:
                 messagebox.showerror("No se pudo abrir", f"{path}\n\n{exc}")
-        if paths and self.media_library:
+        if last_media is not None:
             self.media_list.selection_clear(0, "end")
-            self.media_list.selection_set(len(self.media_library) - 1)
+            self.media_list.selection_set(self.media_library.index(last_media))
             self._select_media()
 
     def _library_drag_start(self, event):
@@ -1578,6 +1633,8 @@ class SimpleEditorPanel(tk.Frame):
         return snapped
 
     def _timeline_press(self, event):
+        if self.playing:
+            self.stop_playback()
         if self.pending_library_media is not None and self._drop_library_media(event):
             return
         x = self.timeline.canvasx(event.x)
@@ -1795,6 +1852,8 @@ class SimpleEditorPanel(tk.Frame):
             self.status.configure(text=f"Audio original del clip: {state}.", fg=YELLOW)
 
     def delete_clip(self):
+        if self.playing:
+            self.stop_playback()
         clip = self.selected_clip
         if not clip or not self._track_of(clip):
             self.status.configure(text="Selecciona un clip para eliminarlo (Supr).", fg=YELLOW)

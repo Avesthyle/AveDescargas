@@ -243,6 +243,11 @@ class ExportPlanTests(unittest.TestCase):
         shrunk = resize_clip_right(clip, 2.0)
         self.assertLessEqual(shrunk.fade_in + shrunk.fade_out, shrunk.duration + 1e-6)
 
+    def test_extreme_vfr_fps_is_clamped_to_safe_default(self):
+        vfr = MediaInfo(path="vfr.webm", duration=5.0, has_video=True, has_audio=False, width=640, height=360, fps=1000.0)
+        plan = build_export_plan(EditorProject([Track("V", "video", clips=[Clip(vfr, source_out=5)])]), "active", None, "salida.mp4")
+        self.assertEqual(plan["fps"], 30.0)
+
 
 if __name__ == "__main__":
     unittest.main()

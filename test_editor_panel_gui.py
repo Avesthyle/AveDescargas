@@ -397,6 +397,29 @@ class EditorPanelGuiTests(unittest.TestCase):
         self.panel._trim_drag(self.video, self.x_at(2.0), alt=True)
         self.assertAlmostEqual(self.video.clips[0].duration, 4.0)
 
+    def test_delete_audio_track_restores_orphaned_video_audio_and_unlinks(self):
+        media = MediaInfo(path="av.mp4", duration=10.0, has_video=True, has_audio=True, width=640, height=360, fps=25.0)
+        vclip = self.add(self.video, 0.0, 5.0, media)
+        self.panel.selected_clip = vclip
+        self.panel.toggle_linked_media()
+        self.panel.project.selected_track_index = 1
+        self.panel.delete_track()
+        self.assertIsNone(vclip.link_group)
+        self.assertTrue(vclip.use_source_audio)
+
+    def test_magnetic_compact_moves_linked_audio_to_free_track_on_collision(self):
+        media = MediaInfo(path="av.mp4", duration=10.0, has_video=True, has_audio=True, width=640, height=360, fps=25.0)
+        vclip = self.add(self.video, 5.0, 3.0, media)
+        self.panel.selected_clip = vclip
+        self.panel.toggle_linked_media()
+        self.add(self.audio, 0.0, 3.0, fake_media(path="bgm.mp3", video=False))
+        self.panel.magnetic_main.set(True)
+        self.panel._apply_magnetic()
+        self.assertAlmostEqual(vclip.timeline_start, 0.0)
+        audio_tracks_with_linked = [t for t in self.panel.project.tracks if t.kind == "audio" and any(c.link_group == vclip.link_group for c in t.clips)]
+        self.assertEqual(len(audio_tracks_with_linked), 1)
+        self.assertIsNot(audio_tracks_with_linked[0], self.audio)
+
 
 @unittest.skipUnless(HAS_DISPLAY and shutil.which("ffmpeg") and shutil.which("ffprobe"), "Necesita pantalla y FFmpeg")
 class EditorEndToEndTests(unittest.TestCase):

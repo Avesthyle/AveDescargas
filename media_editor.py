@@ -581,7 +581,8 @@ def build_export_plan(
     first_video = next((clip for track in video_tracks for clip in track.clips if clip.media.has_video), None)
     width = first_video.media.width if first_video else 0
     height = first_video.media.height if first_video else 0
-    fps = first_video.media.fps if first_video and first_video.media.fps else 30.0
+    raw_fps = first_video.media.fps if first_video and first_video.media.fps else 30.0
+    fps = raw_fps if 10.0 <= raw_fps <= 60.0 else 30.0
     if first_video:
         if preview:
             ratio = min(1.0, 854 / max(1, width), 480 / max(1, height))
