@@ -734,6 +734,51 @@ class PlaylistHandlingTests(unittest.TestCase):
         self.assertEqual(len(scheduled), 1)
         self.assertEqual(dummy_app._queue_after_id, "after-1")
 
+    def test_nonfinite_progress_and_complete_flag_ordering(self):
+        import types
+        from unittest import mock
+        import media_grabber
+
+        while not media_grabber.ui_queue.empty():
+            media_grabber.ui_queue.get_nowait()
+
+        # 1. progress_hook normaliza nan/inf y porcentajes fuera de 0..100
+        media_grabber.CANCEL_REQUESTED = False
+        media_grabber.progress_hook({"status": "downloading", "_percent_str": "nan%", "_speed_str": "", "_eta_str": "", "filename": "x.mp4"})
+        msg_nan = media_grabber.ui_queue.get_nowait()
+        self.assertEqual(msg_nan["percent"], 0.0)
+        media_grabber.progress_hook({"status": "downloading", "_percent_str": "140%", "_speed_str": "", "_eta_str": "", "filename": "x.mp4"})
+        msg_hi = media_grabber.ui_queue.get_nowait()
+        self.assertEqual(msg_hi["percent"], 100.0)
+
+        # 2. check_queue sanea percent NaN sin lanzar TclError en progress_bar
+        media_grabber.ui_queue.put({"type": "progress", "percent": float("nan"), "percent_str": None, "speed": None, "eta": None})
+        dummy_app = types.SimpleNamespace(
+            _queue_after_id=None,
+            progress_bar={"value": 0},
+            lbl_status=types.SimpleNamespace(configure=lambda **_kw: None),
+            btn_download=types.SimpleNamespace(configure=lambda **_kw: None),
+            btn_cancel=types.SimpleNamespace(configure=lambda **_kw: None),
+            log_to_terminal=lambda *_a: None,
+            root=types.SimpleNamespace(winfo_exists=lambda: False),
+        )
+        media_grabber.MediaGrabberApp.check_queue(dummy_app)
+        self.assertEqual(dummy_app.progress_bar["value"], 0.0)
+
+        # 3. run_downloads_thread apaga IS_DOWNLOADING antes de enviar el mensaje complete
+        observed_flags = []
+        orig_put = media_grabber.ui_queue.put
+
+        def inspect_put(item):
+            if isinstance(item, dict) and item.get("type") == "complete":
+                observed_flags.append(media_grabber.IS_DOWNLOADING)
+            return orig_put(item)
+
+        with mock.patch("media_grabber.get_ffmpeg_path", return_value=None), \
+             mock.patch.object(media_grabber.ui_queue, "put", side_effect=inspect_put):
+            media_grabber.run_downloads_thread([], ".", "mp4", "1080p (Full HD)")
+        self.assertEqual(observed_flags, [False])
+
 
 if __name__ == "__main__":
     unittest.main()

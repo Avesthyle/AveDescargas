@@ -8,6 +8,7 @@ import os
 import sys
 import re
 import json
+import math
 import subprocess
 import threading
 import ctypes
@@ -521,7 +522,11 @@ def progress_hook(d):
 
         try:
             percent_val = float(percent_str.replace('%', '').strip())
-        except ValueError:
+            if not math.isfinite(percent_val):
+                percent_val = 0.0
+            else:
+                percent_val = max(0.0, min(100.0, percent_val))
+        except (TypeError, ValueError):
             percent_val = 0.0
 
         ui_queue.put({
@@ -722,13 +727,13 @@ def run_downloads_thread(download_targets, output_dir, fmt, video_quality, inclu
         err_count += 1
         ui_queue.put({'type': 'log', 'text': f"❌ Error inesperado: {exc}", 'level': 'error'})
     finally:
+        IS_DOWNLOADING = False
         ui_queue.put({
             'type': 'complete',
             'ok_count': ok_count,
             'err_count': err_count,
             'cancelled': cancelled
         })
-        IS_DOWNLOADING = False
 
 
 def ask_playlist_action(parent):
@@ -910,7 +915,7 @@ def select_playlist_entries(parent, url):
                 selectcolor="#1e1e1e",
                 anchor="w",
                 justify="left",
-                wraplength=540,
+                wraplength=max(240, win_w - 110),
             )
             cb.pack(fill="x", padx=10, pady=3)
             bind_scroll(cb)
@@ -1678,10 +1683,16 @@ class MediaGrabberApp:
                     self.progress_bar['value'] = 0
 
                 elif m_type == 'progress':
-                    percent = msg.get('percent', 0.0)
-                    percent_str = msg.get('percent_str', '')
-                    speed = msg.get('speed', '')
-                    eta = msg.get('eta', '')
+                    try:
+                        percent = float(msg.get('percent') or 0.0)
+                    except (TypeError, ValueError):
+                        percent = 0.0
+                    if not math.isfinite(percent):
+                        percent = 0.0
+                    percent = max(0.0, min(100.0, percent))
+                    percent_str = msg.get('percent_str') or ''
+                    speed = msg.get('speed') or ''
+                    eta = msg.get('eta') or ''
 
                     self.progress_bar['value'] = percent
                     self.lbl_status.configure(text=f"Descargando: {percent_str} | Velocidad: {speed} | Tiempo restante: {eta}", fg="#0078d4")
