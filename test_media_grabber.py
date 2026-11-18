@@ -405,6 +405,60 @@ class PlaylistHandlingTests(unittest.TestCase):
         self.assertEqual(panel_destroyed, [True])
         self.assertEqual(destroyed, [True])
 
+    def test_auto_title_clears_when_url_changes_and_mp3_checks_ffmpeg(self):
+        import types
+        from unittest import mock
+        import media_grabber
+
+        class DummyVar:
+            def __init__(self, value=""):
+                self.value = value
+            def get(self):
+                return self.value
+            def set(self, value):
+                self.value = value
+
+        class DummyText:
+            def __init__(self, content):
+                self.content = content
+            def get(self, *_args):
+                return self.content
+
+        url1 = "https://www.youtube.com/watch?v=one"
+        url2 = "https://www.youtube.com/watch?v=two"
+        dummy = types.SimpleNamespace(
+            url_input=DummyText(url1),
+            custom_name_var=DummyVar(""),
+            title_lookup_url=url1,
+            _auto_title_value="Titulo Viejo",
+        )
+        dummy.custom_name_var.set("Titulo Viejo")
+        dummy.url_input = DummyText(url2)
+        with mock.patch("media_grabber.threading.Thread") as thread_mock:
+            media_grabber.MediaGrabberApp.load_title_async(dummy)
+        self.assertEqual(dummy.custom_name_var.get(), "Obteniendo título…")
+        thread_mock.assert_called_once()
+
+        # Si el usuario pega una playlist tras detectar un título automático, se limpia
+        dummy.custom_name_var.set("Titulo Viejo")
+        dummy._auto_title_value = "Titulo Viejo"
+        dummy.url_input = DummyText("https://www.youtube.com/watch?v=two&list=PL123")
+        media_grabber.MediaGrabberApp.load_title_async(dummy)
+        self.assertEqual(dummy.custom_name_var.get(), "")
+
+        # Sin FFmpeg, el modo MP3 falla antes de invocar yt_dlp
+        while not media_grabber.ui_queue.empty():
+            media_grabber.ui_queue.get_nowait()
+        with mock.patch("media_grabber.get_ffmpeg_path", return_value=None), \
+             mock.patch("media_grabber.yt_dlp.YoutubeDL") as ydl_mock:
+            media_grabber.run_downloads_thread([{"url": url2}], "/tmp", "mp3", "1080p (Full HD)")
+        ydl_mock.assert_not_called()
+        events = []
+        while not media_grabber.ui_queue.empty():
+            events.append(media_grabber.ui_queue.get_nowait())
+        self.assertTrue(any(e.get("type") == "log" and "MP3" in e.get("text", "") for e in events))
+        self.assertTrue(any(e.get("type") == "complete" and e.get("err_count") == 1 for e in events))
+
 
 if __name__ == "__main__":
     unittest.main()

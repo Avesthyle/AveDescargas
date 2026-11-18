@@ -299,6 +299,21 @@ class ExportPlanTests(unittest.TestCase):
         self.assertEqual(plan["fps"], 60.0)
         self.assertGreaterEqual(plan["filter_complex"].count("fps=60"), 2)
 
+    def test_project_round_trip_deduplicates_separated_audio_media(self):
+        from media_editor import audio_media_from_video, project_from_dict, project_to_dict
+        v = video_info("shared.mp4", duration=10.0)
+        a = audio_media_from_video(v)
+        proj = EditorProject([
+            Track("Vídeo 1", "video", clips=[Clip(v, source_out=6.0, use_source_audio=False, link_group="g1")]),
+            Track("Audio 1", "audio", clips=[Clip(a, source_out=6.0, link_group="g1")]),
+        ])
+        payload = project_to_dict(proj, media_library=[v])
+        self.assertEqual(len(payload["media"]), 1)
+        restored, _heights, restored_media = project_from_dict(payload)
+        self.assertEqual(len(restored_media), 1)
+        self.assertTrue(restored.tracks[0].clips[0].media.has_video)
+        self.assertFalse(restored.tracks[1].clips[0].media.has_video)
+
 
 if __name__ == "__main__":
     unittest.main()

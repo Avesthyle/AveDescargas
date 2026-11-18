@@ -584,6 +584,14 @@ def run_downloads_thread(download_targets, output_dir, fmt, video_quality, inclu
                 continue
 
             if fmt == "mp3":
+                if not ffmpeg_path:
+                    ui_queue.put({
+                        'type': 'log',
+                        'text': '❌ FFmpeg no está instalado o no se encuentra. Es necesario para convertir el audio a MP3.',
+                        'level': 'error'
+                    })
+                    err_count += 1
+                    continue
                 ydl_opts.update({
                     'format': 'bestaudio[ext=m4a]/bestaudio/best',
                     'postprocessors': [
@@ -921,6 +929,7 @@ class MediaGrabberApp:
         self.root = root
         self.settings = load_settings(SETTINGS_PATH)
         self.title_lookup_url = None
+        self._auto_title_value = None
         self.root.title("AveDescargas — Descargador Universal")
         self.root.geometry("1100x720")
         self.root.minsize(650, 480)
@@ -1317,18 +1326,22 @@ class MediaGrabberApp:
     def load_title_async(self, force=False):
         urls = [u.strip() for u in self.url_input.get("1.0", tk.END).splitlines() if u.strip()]
         current_name = self.custom_name_var.get().strip()
+        auto_val = getattr(self, "_auto_title_value", None)
+        is_auto = bool(auto_val and current_name == auto_val)
         if len(urls) != 1 or has_playlist_reference(urls[0]) or not urls[0].startswith("http"):
             self.title_lookup_url = None
-            if force or current_name == "Obteniendo título…":
+            if force or current_name == "Obteniendo título…" or is_auto:
                 self.custom_name_var.set("")
+                self._auto_title_value = None
             return
         url = urls[0]
         if not force and url == self.title_lookup_url and current_name:
             return
-        if not force and current_name and current_name != "Obteniendo título…":
+        if not force and current_name and current_name != "Obteniendo título…" and not is_auto:
             self.title_lookup_url = url
             return
         self.title_lookup_url = url
+        self._auto_title_value = None
         self.custom_name_var.set("Obteniendo título…")
 
         def worker():
@@ -1345,6 +1358,7 @@ class MediaGrabberApp:
     def clear_urls(self):
         self.url_input.delete("1.0", tk.END)
         self.title_lookup_url = None
+        self._auto_title_value = None
         self.custom_name_var.set("")
 
     def clear_log(self):
@@ -1452,9 +1466,16 @@ class MediaGrabberApp:
         save_settings(SETTINGS_PATH, self.settings)
 
         if len(download_targets) == 1:
-            custom_name = sanitize_output_name(self.custom_name_var.get())
-            if custom_name and custom_name != "Obteniendo título…":
-                download_targets[0]["custom_name"] = custom_name
+            raw_custom = self.custom_name_var.get().strip()
+            auto_val = getattr(self, "_auto_title_value", None)
+            if auto_val and raw_custom == auto_val and download_targets[0]["url"] != self.title_lookup_url:
+                self.custom_name_var.set("")
+                self._auto_title_value = None
+                self.title_lookup_url = None
+            else:
+                custom_name = sanitize_output_name(raw_custom)
+                if custom_name and raw_custom != "Obteniendo título…":
+                    download_targets[0]["custom_name"] = custom_name
 
         fmt = self.fmt_var.get()
         video_quality = self.quality_var.get()
@@ -1516,8 +1537,12 @@ class MediaGrabberApp:
 
             elif m_type == 'detected_title':
                 if msg.get('url') == self.title_lookup_url:
-                    if self.custom_name_var.get().strip() in ("", "Obteniendo título…"):
-                        self.custom_name_var.set(msg.get('title') or "")
+                    auto_val = getattr(self, "_auto_title_value", None)
+                    current = self.custom_name_var.get().strip()
+                    if current in ("", "Obteniendo título…") or (auto_val and current == auto_val):
+                        detected = msg.get('title') or ""
+                        self._auto_title_value = detected or None
+                        self.custom_name_var.set(detected)
 
             elif m_type == 'youtube_login_opened':
                 messagebox.showinfo(

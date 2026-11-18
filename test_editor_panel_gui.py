@@ -957,6 +957,82 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_paste_syncs_marks_load_resets_state_and_ctrl_shift_z_bindings(self):
+        root = tk.Tk()
+        root.geometry("900x700+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            a_media = MediaInfo(path="song.mp3", duration=8.0, has_video=False, has_audio=True)
+            clip = Clip(a_media, source_in=1.0, source_out=4.0, timeline_start=0.0, use_source_audio=False)
+            panel.clipboard_clip = clip
+            panel.mark_in, panel.mark_out = 0.0, 99.0
+            panel.playhead_timeline = 2.0
+            panel.paste_clip()
+            self.assertAlmostEqual(panel.mark_in, 1.0, places=3)
+            self.assertAlmostEqual(panel.mark_out, 4.0, places=3)
+            self.assertFalse(panel.keep_audio.get())
+
+            missing_media = MediaInfo(path="/no/existe/clip.mp4", duration=5.0, has_video=True, has_audio=False, width=320, height=180, fps=30.0)
+            from media_editor import EditorProject, Track, save_project
+            with tempfile.TemporaryDirectory() as tmp:
+                proj_path = tmp + "/test.avep"
+                save_project(proj_path, EditorProject([Track("V1", "video")]), media_library=[missing_media])
+                panel.playhead_timeline = 12.0
+                with mock.patch("simple_editor_panel.filedialog.askopenfilename", return_value=proj_path), \
+                     mock.patch("simple_editor_panel.messagebox.showwarning"):
+                    panel.load_project_dialog()
+            self.assertAlmostEqual(panel.playhead_timeline, 0.0, places=5)
+            panel.media_list.selection_set(0)
+            panel._insert_selected_media()
+            self.assertEqual(panel.project.tracks[0].clips, [])
+
+            # Bloq Mayus + Ctrl+Z (state=0x0006) debe llamar a undo y <Control-Shift-Z> a redo
+            v_clip = Clip(MediaInfo(path="v.mp4", duration=4.0, has_video=True, has_audio=False), source_out=4.0)
+            panel._push_undo()
+            panel.project.tracks[0].clips.append(v_clip)
+            panel.timeline.focus_force()
+            root.update_idletasks()
+            root.update()
+            panel.timeline.event_generate("<KeyPress-Z>", state=0x0006)
+            root.update()
+            self.assertEqual(panel.project.tracks[0].clips, [])
+            panel.timeline.event_generate("<Control-Shift-Z>")
+            root.update()
+            self.assertEqual(len(panel.project.tracks[0].clips), 1)
+
+            # Si cambia frame_token justo al arrancar ffmpeg, v_proc se termina y no se registra como activo
+            with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_vid:
+                panel.selected_media = MediaInfo(path=tmp_vid.name, duration=4.0, has_video=True, has_audio=False)
+                panel.mark_in, panel.mark_out = 0.0, 4.0
+                panel.cursor_time = 0.0
+                fake_proc = mock.MagicMock()
+                fake_proc.poll.return_value = None
+                fake_proc.stdout = mock.MagicMock()
+                fake_proc.stderr = mock.MagicMock()
+
+                def bump_token(*_args, **_kwargs):
+                    panel.frame_token += 1
+                    return fake_proc
+
+                with mock.patch("simple_editor_panel.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+                     mock.patch("simple_editor_panel.subprocess.Popen", side_effect=bump_token):
+                    panel.toggle_play()
+                    import time
+                    deadline = time.monotonic() + 2.0
+                    while not fake_proc.terminate.called and time.monotonic() < deadline:
+                        root.update()
+                        time.sleep(0.01)
+                self.assertTrue(fake_proc.terminate.called)
+                self.assertIsNone(panel.video_process)
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

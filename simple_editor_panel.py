@@ -224,7 +224,9 @@ class SimpleEditorPanel(tk.Frame):
             "<Shift-Delete>": (self.ripple_delete_clip, False),
             "<BackSpace>": (self._delete_shortcut, False),
             "<Control-z>": (self.undo, False),
-            "<Control-Z>": (self.redo, False),
+            "<Control-Z>": (self.undo, False),
+            "<Control-Shift-z>": (self.redo, False),
+            "<Control-Shift-Z>": (self.redo, False),
             "<Control-y>": (self.redo, False),
             "<Control-Y>": (self.redo, False),
             "<Control-k>": (self.split_at_playhead, False),
@@ -1026,12 +1028,19 @@ class SimpleEditorPanel(tk.Frame):
         track.clips.append(pasted)
         self.selected_clip = pasted
         self.selected_media = pasted.media
+        self._sync_selection_marks(pasted)
+        self.keep_audio.set(self._effective_clip_audio(pasted))
         self.project.selected_track_index = self.project.tracks.index(track)
         if track is self._main_track():
             self._apply_magnetic()
         self._refresh_tracks()
         self._update_inspector()
         self.redraw_timeline()
+        if pasted.media.has_video and os.path.isfile(pasted.media.path):
+            self.request_frame(self.cursor_time)
+        elif not pasted.media.has_video:
+            self.preview_photo = None
+            self.preview.configure(image="", text=f"♫  {pathlib.Path(pasted.media.path).name}")
         self.status.configure(text=f"Pegado: {pasted.name}", fg=GREEN)
 
     def duplicate_clip(self):
@@ -1080,8 +1089,13 @@ class SimpleEditorPanel(tk.Frame):
         self._push_undo()
         self.project = project
         self.track_heights = heights
+        self.playhead_timeline = 0.0
         self.selected_clip = None
         self.selected_media = None
+        self.drag_clip = None
+        self.drag_track = None
+        self.resize_side = None
+        self._pending_snapshot = None
         self.waveform_cache.clear()
         self.waveform_pending.clear()
         by_path = {}
@@ -1099,13 +1113,16 @@ class SimpleEditorPanel(tk.Frame):
         self.media_library = unique_media
         self.media_list.delete(0, "end")
         missing = []
+        self._missing_media_paths = set()
         for media in unique_media:
             exists = os.path.isfile(media.path)
             if not exists:
                 missing.append(media.path)
+                self._missing_media_paths.add(os.path.normcase(os.path.abspath(media.path)))
             icon = "▶" if media.has_video else "♫"
             suffix = "" if exists else " (no encontrado)"
             self.media_list.insert("end", f"{icon}  {pathlib.Path(media.path).name}   ·   {format_editor_time(media.duration)}{suffix}")
+        self._refresh_preview_at_playhead()
         self._refresh_tracks()
         self._update_inspector()
         self.redraw_timeline()
@@ -1198,11 +1215,20 @@ class SimpleEditorPanel(tk.Frame):
             self.pending_library_media = None
             self.status.configure(text="Suelta el archivo dentro de un canal compatible.", fg=YELLOW)
 
+    def _is_known_missing(self, media):
+        key = os.path.normcase(os.path.abspath(media.path))
+        return key in getattr(self, "_missing_media_paths", set()) and not os.path.isfile(media.path)
+
     def _drop_library_media(self, event, media_list=None):
         items = list(media_list) if media_list is not None else ([self.pending_library_media] if self.pending_library_media else [])
         self.pending_library_media = None
         if not items:
             return False
+        missing = [m for m in items if self._is_known_missing(m)]
+        items = [m for m in items if not self._is_known_missing(m)]
+        if not items and missing:
+            self.status.configure(text=f"Archivo no encontrado en disco: {pathlib.Path(missing[0].path).name}", fg=RED)
+            return True
         track = self._track_at_y(self.timeline.canvasy(event.y))
         compatible = [
             m for m in items
@@ -1266,6 +1292,9 @@ class SimpleEditorPanel(tk.Frame):
         if not selection:
             return
         media = self.media_library[selection[0]]
+        if self._is_known_missing(media):
+            self.status.configure(text=f"Archivo no encontrado en disco: {pathlib.Path(media.path).name}", fg=RED)
+            return
         kind = "video" if media.has_video else "audio"
         track = self.project.selected_track()
         if not track or track.kind != kind:
@@ -1662,8 +1691,15 @@ class SimpleEditorPanel(tk.Frame):
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
                 p = panel_ref()
-                if p is not None:
-                    p.video_process = v_proc
+                if p is None or token != p.frame_token:
+                    p = None
+                    if v_proc.poll() is None:
+                        try:
+                            v_proc.terminate()
+                        except Exception:
+                            pass
+                    return
+                p.video_process = v_proc
                 p = None
                 if play_audio:
                     audio_command = [ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}"]
@@ -1681,8 +1717,16 @@ class SimpleEditorPanel(tk.Frame):
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     )
                     p = panel_ref()
-                    if p is not None:
-                        p.audio_process = a_proc
+                    if p is None or token != p.frame_token:
+                        p = None
+                        for proc in (a_proc, v_proc):
+                            if proc.poll() is None:
+                                try:
+                                    proc.terminate()
+                                except Exception:
+                                    pass
+                        return
+                    p.audio_process = a_proc
                     p = None
                 frame_size = preview_w * preview_h * 3
                 frame_index = 0

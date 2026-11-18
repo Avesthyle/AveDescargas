@@ -816,16 +816,14 @@ def project_to_dict(
 ) -> dict:
     """Serializa un EditorProject a un diccionario JSON."""
     media_list: list[MediaInfo] = []
-    media_index: dict[int, int] = {}
-    for media in media_library or []:
-        if id(media) not in media_index:
-            media_index[id(media)] = len(media_list)
+    media_index: dict[str, int] = {}
+    for media in list(media_library or []) + [c.media for t in project.tracks for c in t.clips]:
+        key = os.path.normcase(os.path.abspath(media.path))
+        if key not in media_index:
+            media_index[key] = len(media_list)
             media_list.append(media)
-    for track in project.tracks:
-        for clip in track.clips:
-            if id(clip.media) not in media_index:
-                media_index[id(clip.media)] = len(media_list)
-                media_list.append(clip.media)
+        elif media.has_video and not media_list[media_index[key]].has_video:
+            media_list[media_index[key]] = media
     return {
         "version": 1,
         "selected_track_index": project.selected_track_index,
@@ -853,7 +851,8 @@ def project_to_dict(
                 "muted": t.muted,
                 "clips": [
                     {
-                        "media_idx": media_index[id(c.media)],
+                        "media_idx": media_index[os.path.normcase(os.path.abspath(c.media.path))],
+                        "clip_has_video": bool(c.media.has_video),
                         "source_in": c.source_in,
                         "source_out": c.source_out,
                         "timeline_start": c.timeline_start,
@@ -892,9 +891,13 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
     ]
     tracks = []
     for t in data.get("tracks", []):
-        clips = [
-            Clip(
-                media=media_list[int(c["media_idx"])],
+        clips = []
+        for c in t.get("clips", []):
+            base_media = media_list[int(c["media_idx"])]
+            clip_has_video = c.get("clip_has_video", t["kind"] == "video" and base_media.has_video)
+            clip_media = base_media if (clip_has_video or not base_media.has_video) else audio_media_from_video(base_media)
+            clips.append(Clip(
+                media=clip_media,
                 source_in=c["source_in"],
                 source_out=c["source_out"],
                 timeline_start=c["timeline_start"],
@@ -905,9 +908,7 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
                 volume=float(c.get("volume", 1.0)),
                 fade_in=float(c.get("fade_in", 0.0)),
                 fade_out=float(c.get("fade_out", 0.0)),
-            )
-            for c in t.get("clips", [])
-        ]
+            ))
         tracks.append(Track(
             name=t["name"],
             kind=t["kind"],
