@@ -1033,6 +1033,60 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_repeated_left_splits_avoid_link_group_collision_and_spinbox_commits_on_click(self):
+        root = tk.Tk()
+        root.geometry("1200x800+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            v_media = MediaInfo(path="v.mp4", duration=12.0, has_video=True, has_audio=True, width=640, height=360, fps=30.0)
+            a_media = audio_media_from_video(v_media)
+            v0 = Clip(v_media, source_in=0.0, source_out=10.0, timeline_start=0.0, use_source_audio=False, link_group="g1")
+            a0 = Clip(a_media, source_in=0.0, source_out=10.0, timeline_start=0.0, link_group="g1")
+            panel.project.tracks[0].clips = [v0]
+            panel.project.tracks[1].clips = [a0]
+
+            panel.playhead_timeline = 5.0
+            panel.selected_clip = panel.project.tracks[0].clips[0]
+            panel.split_at_playhead()
+            # Volver a cortar la mitad izquierda en 2.5s
+            panel.playhead_timeline = 2.5
+            panel.selected_clip = panel.project.tracks[0].clips[0]
+            panel.split_at_playhead()
+
+            v_clips = panel.project.tracks[0].clips
+            a_clips = panel.project.tracks[1].clips
+            self.assertEqual(len(v_clips), 3)
+            self.assertEqual(len(a_clips), 3)
+            v_groups = [c.link_group for c in v_clips]
+            a_groups = [c.link_group for c in a_clips]
+            self.assertEqual(len(set(v_groups)), 3)
+            self.assertEqual(v_groups, a_groups)
+
+            # Editar el spinbox de volumen del clip 1 y hacer clic directo en el clip 2
+            panel.selected_clip = v_clips[0]
+            panel._update_inspector()
+            panel.redraw_timeline()
+            root.update()
+            panel.volume_spin.focus_force()
+            root.update()
+            panel.volume_spin.delete(0, "end")
+            panel.volume_spin.insert(0, "150")
+            x_second = panel._x_at_time(v_clips[1].timeline_start + 1.0)
+            y_first_track = panel._layout()[0][0] + 15
+            panel.timeline.event_generate("<ButtonPress-1>", x=int(x_second), y=int(y_first_track))
+            root.update()
+            self.assertAlmostEqual(v_clips[0].volume, 1.5, places=2)
+            self.assertAlmostEqual(a_clips[0].volume, 1.5, places=2)
+            self.assertAlmostEqual(v_clips[1].volume, 1.0, places=2)
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

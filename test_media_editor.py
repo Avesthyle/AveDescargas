@@ -314,6 +314,30 @@ class ExportPlanTests(unittest.TestCase):
         self.assertTrue(restored.tracks[0].clips[0].media.has_video)
         self.assertFalse(restored.tracks[1].clips[0].media.has_video)
 
+    def test_probe_media_handles_null_dimensions_and_project_from_dict_validates_bounds(self):
+        import json
+        from media_editor import probe_media, project_from_dict
+        payload = json.dumps({
+            "format": {"duration": "8.0", "format_name": "mp4"},
+            "streams": [{"codec_type": "video", "width": None, "height": None, "avg_frame_rate": "30/1"}],
+        })
+        fake = type("R", (), {"returncode": 0, "stdout": payload, "stderr": ""})()
+        with patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             patch("media_editor.subprocess.run", return_value=fake):
+            info = probe_media("null_dim.mp4")
+        self.assertEqual((info.width, info.height), (0, 0))
+
+        restored, _, _ = project_from_dict({
+            "media": [{"path": "a.mp4", "duration": 5.0, "has_video": True, "has_audio": False, "width": None, "height": None, "fps": None}],
+            "tracks": [{"name": "V1", "kind": "video", "clips": [{"media_idx": 0, "source_in": 0, "source_out": 5, "timeline_start": 0, "volume": None}]}],
+            "selected_track_index": 99,
+            "track_heights": None,
+        })
+        self.assertEqual(restored.selected_track_index, 0)
+        self.assertEqual(restored.tracks[0].clips[0].volume, 1.0)
+        with self.assertRaises(ValueError):
+            project_from_dict({"media": [], "tracks": [{"name": "V1", "kind": "video", "clips": [{"media_idx": 3, "source_in": 0, "source_out": 1, "timeline_start": 0}]}]})
+
 
 if __name__ == "__main__":
     unittest.main()

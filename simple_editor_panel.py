@@ -646,6 +646,18 @@ class SimpleEditorPanel(tk.Frame):
         self._seek_at_time(seconds)
         self._ensure_playhead_visible()
 
+    def _next_link_group(self, base):
+        existing = {c.link_group for t in self.project.tracks for c in t.clips if c.link_group}
+        stem = base
+        if "-" in base:
+            head, tail = base.rsplit("-", 1)
+            if tail == "b" or tail.isdigit():
+                stem = head
+        idx = 2
+        while f"{stem}-{idx}" in existing:
+            idx += 1
+        return f"{stem}-{idx}"
+
     def split_at_playhead(self):
         """Divide en el cabezal el clip seleccionado (o los clips bajo el cabezal en la pista seleccionada)."""
         if self.playing:
@@ -667,11 +679,15 @@ class SimpleEditorPanel(tk.Frame):
             self.status.configure(text="Coloca el cabezal dentro de un clip para dividirlo (S).", fg=YELLOW)
             return
         self._push_undo()
+        group_map = {}
+        for clip in targets:
+            if clip.link_group and clip.link_group not in group_map:
+                group_map[clip.link_group] = self._next_link_group(clip.link_group)
         for clip in targets:
             track = self._track_of(clip)
             left, right = split_clip(clip, time_point)
             if clip.link_group:
-                right.link_group = clip.link_group + "-b"
+                right.link_group = group_map[clip.link_group]
             index = track.clips.index(clip)
             track.clips[index:index + 1] = [left, right]
             if clip is self.selected_clip:
@@ -922,6 +938,16 @@ class SimpleEditorPanel(tk.Frame):
         self.status.configure(text="Audio separado a pista de audio (sin duplicar sonido).", fg=GREEN)
         self.redraw_timeline()
 
+    def _commit_inspector_edits(self):
+        if not self.selected_clip:
+            return
+        try:
+            focus = self.focus_get()
+        except (KeyError, tk.TclError):
+            focus = None
+        if focus in (getattr(self, "volume_spin", None), getattr(self, "fade_in_spin", None), getattr(self, "fade_out_spin", None)):
+            self._apply_audio_props()
+
     def _apply_audio_props(self):
         clip = self.selected_clip
         if not clip:
@@ -1060,6 +1086,7 @@ class SimpleEditorPanel(tk.Frame):
         self._move_playhead(max(0.0, self.playhead_timeline + count / fps))
 
     def save_project_dialog(self):
+        self._commit_inspector_edits()
         path = filedialog.asksaveasfilename(
             title="Guardar proyecto", defaultextension=".avep",
             initialfile="proyecto.avep",
@@ -1270,6 +1297,7 @@ class SimpleEditorPanel(tk.Frame):
         selection = self.media_list.curselection()
         if not selection:
             return
+        self._commit_inspector_edits()
         self.stop_playback()
         self.selected_media = self.media_library[selection[0]]
         self.cursor_time = 0.0
@@ -1408,6 +1436,8 @@ class SimpleEditorPanel(tk.Frame):
             self.preview.configure(image="", text="")
 
     def capture_frame(self):
+        if self.playing:
+            self.stop_playback()
         media = self.selected_media
         if not media or not media.has_video:
             self.status.configure(text="Selecciona un vídeo para capturar un fotograma.", fg=YELLOW)
@@ -1858,15 +1888,17 @@ class SimpleEditorPanel(tk.Frame):
             self.status.configure(text="La cuchilla debe estar dentro del clip, no en sus extremos.", fg=YELLOW)
             return
         self._push_undo()
+        new_group = self._next_link_group(clip.link_group) if clip.link_group else None
         for linked in self._linked_clips(clip):
             linked_pieces = split_clip(linked, timeline_cut)
             linked_track = self._track_of(linked)
             if linked_pieces and linked_track:
-                linked_pieces[1].link_group = (linked.link_group or "") + "-b"
+                if new_group:
+                    linked_pieces[1].link_group = new_group
                 index = linked_track.clips.index(linked)
                 linked_track.clips[index:index + 1] = list(linked_pieces)
-        if clip.link_group:
-            pieces[1].link_group = clip.link_group + "-b"
+        if new_group:
+            pieces[1].link_group = new_group
         for track in self.project.tracks:
             if clip in track.clips:
                 index = track.clips.index(clip)
@@ -2072,6 +2104,7 @@ class SimpleEditorPanel(tk.Frame):
         return snapped
 
     def _timeline_press(self, event):
+        self._commit_inspector_edits()
         self.timeline.focus_set()
         if self.playing:
             self.stop_playback()
@@ -2111,7 +2144,7 @@ class SimpleEditorPanel(tk.Frame):
                 self.selected_media = active_clip.media
                 self.mark_in = active_clip.source_in
                 self.mark_out = active_clip.source_out
-                self.keep_audio.set(active_clip.use_source_audio)
+                self.keep_audio.set(self._effective_clip_audio(active_clip))
                 self.cursor_time = timeline_to_source_time(active_clip, self.playhead_timeline)
                 if active_clip.media.has_video:
                     self.request_frame(self.cursor_time)
@@ -2401,6 +2434,9 @@ class SimpleEditorPanel(tk.Frame):
             self.timeline.xview_moveto(min(1.0, target_left / total))
 
     def export(self):
+        self._commit_inspector_edits()
+        if self.playing:
+            self.stop_playback()
         if self.exporting:
             self.status.configure(text="Ya hay una exportación en curso.", fg=YELLOW)
             return

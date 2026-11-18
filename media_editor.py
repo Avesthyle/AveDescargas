@@ -566,10 +566,10 @@ def probe_media(path: str) -> MediaInfo:
         duration=duration,
         has_video=video is not None,
         has_audio=audio is not None,
-        width=int(video.get("width", 0)) if video else 0,
-        height=int(video.get("height", 0)) if video else 0,
+        width=int(video.get("width") or 0) if video else 0,
+        height=int(video.get("height") or 0) if video else 0,
         fps=_parse_fps(video.get("avg_frame_rate") or video.get("r_frame_rate") or "0") if video else 0.0,
-        format_name=data.get("format", {}).get("format_name", ""),
+        format_name=str(data.get("format", {}).get("format_name") or ""),
         video_codec=video.get("codec_name") if video else None,
         audio_codec=audio.get("codec_name") if audio else None,
     )
@@ -874,16 +874,18 @@ def project_to_dict(
 
 def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list[MediaInfo]]:
     """Reconstruye (EditorProject, track_heights, media_list) desde un diccionario JSON."""
+    if not isinstance(data, dict):
+        raise ValueError("El archivo de proyecto no tiene un formato JSON válido.")
     media_list = [
         MediaInfo(
             path=m["path"],
             duration=float(m["duration"]),
             has_video=bool(m["has_video"]),
             has_audio=bool(m["has_audio"]),
-            width=int(m.get("width", 0)),
-            height=int(m.get("height", 0)),
-            fps=float(m.get("fps", 0.0)),
-            format_name=str(m.get("format_name", "")),
+            width=int(m.get("width") or 0),
+            height=int(m.get("height") or 0),
+            fps=float(m.get("fps") or 0.0),
+            format_name=str(m.get("format_name") or ""),
             video_codec=m.get("video_codec"),
             audio_codec=m.get("audio_codec"),
         )
@@ -893,7 +895,10 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
     for t in data.get("tracks", []):
         clips = []
         for c in t.get("clips", []):
-            base_media = media_list[int(c["media_idx"])]
+            media_idx = int(c["media_idx"])
+            if not 0 <= media_idx < len(media_list):
+                raise ValueError(f"Índice de archivo inválido en proyecto: {media_idx}")
+            base_media = media_list[media_idx]
             clip_has_video = c.get("clip_has_video", t["kind"] == "video" and base_media.has_video)
             clip_media = base_media if (clip_has_video or not base_media.has_video) else audio_media_from_video(base_media)
             clips.append(Clip(
@@ -902,12 +907,12 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
                 source_out=c["source_out"],
                 timeline_start=c["timeline_start"],
                 use_source_audio=bool(c.get("use_source_audio", True)),
-                name=str(c.get("name", "")),
-                pitch_semitones=int(c.get("pitch_semitones", 0)),
+                name=str(c.get("name") or ""),
+                pitch_semitones=int(c.get("pitch_semitones") or 0),
                 link_group=c.get("link_group"),
-                volume=float(c.get("volume", 1.0)),
-                fade_in=float(c.get("fade_in", 0.0)),
-                fade_out=float(c.get("fade_out", 0.0)),
+                volume=float(1.0 if c.get("volume") is None else c.get("volume")),
+                fade_in=float(c.get("fade_in") or 0.0),
+                fade_out=float(c.get("fade_out") or 0.0),
             ))
         tracks.append(Track(
             name=t["name"],
@@ -916,8 +921,11 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
             muted=bool(t.get("muted", False)),
             clips=clips,
         ))
-    project = EditorProject(tracks=tracks, selected_track_index=int(data.get("selected_track_index", 0)))
-    heights = {str(k): clamp_track_height(v) for k, v in data.get("track_heights", {}).items()}
+    raw_sel = int(data.get("selected_track_index") or 0)
+    sel_idx = max(0, min(len(tracks) - 1, raw_sel)) if tracks else 0
+    project = EditorProject(tracks=tracks, selected_track_index=sel_idx)
+    raw_heights = data.get("track_heights") or {}
+    heights = {str(k): clamp_track_height(v) for k, v in raw_heights.items()}
     return project, heights, media_list
 
 
