@@ -375,6 +375,36 @@ class PlaylistHandlingTests(unittest.TestCase):
             media_grabber.run_downloads_thread([{"url": "https://example.com"}], "/tmp", "mp4", "1080p (Full HD)")
         self.assertFalse(media_grabber.IS_DOWNLOADING)
 
+    def test_on_close_confirms_export_and_cleans_up(self):
+        import types
+        from unittest import mock
+        import media_grabber
+
+        destroyed = []
+        canceled = []
+        panel_destroyed = []
+        dummy = types.SimpleNamespace(
+            _queue_after_id="after#1",
+            root=types.SimpleNamespace(
+                after_cancel=lambda aid: canceled.append(aid),
+                destroy=lambda: destroyed.append(True),
+            ),
+            editor_panel=types.SimpleNamespace(
+                exporting=True,
+                destroy=lambda: panel_destroyed.append(True),
+            ),
+        )
+        with mock.patch("media_grabber.messagebox.askyesno", return_value=False):
+            media_grabber.MediaGrabberApp.on_close(dummy)
+        self.assertEqual(destroyed, [])
+        self.assertEqual(panel_destroyed, [])
+
+        with mock.patch("media_grabber.messagebox.askyesno", return_value=True):
+            media_grabber.MediaGrabberApp.on_close(dummy)
+        self.assertEqual(canceled, ["after#1"])
+        self.assertEqual(panel_destroyed, [True])
+        self.assertEqual(destroyed, [True])
+
 
 if __name__ == "__main__":
     unittest.main()

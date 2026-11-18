@@ -952,14 +952,31 @@ class MediaGrabberApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         
         # Start queue checking loop
-        self.root.after(100, self.check_queue)
+        self._queue_after_id = self.root.after(100, self.check_queue)
 
     def on_close(self):
         global CANCEL_REQUESTED
+        editor_panel = getattr(self, "editor_panel", None)
+        if getattr(editor_panel, "exporting", False):
+            if not messagebox.askyesno(
+                "Exportación en curso",
+                "Hay una exportación en curso.\n\n¿Seguro que quieres cerrar la aplicación y cancelar la exportación?",
+            ):
+                return
         CANCEL_REQUESTED = True
-        if hasattr(self, "editor_panel") and hasattr(self.editor_panel, "stop_playback"):
+        after_id = getattr(self, "_queue_after_id", None)
+        if after_id:
             try:
-                self.editor_panel.stop_playback()
+                self.root.after_cancel(after_id)
+            except (AttributeError, tk.TclError, ValueError):
+                pass
+            self._queue_after_id = None
+        if editor_panel is not None:
+            try:
+                if hasattr(editor_panel, "destroy"):
+                    editor_panel.destroy()
+                elif hasattr(editor_panel, "stop_playback"):
+                    editor_panel.stop_playback()
             except Exception:
                 pass
         self.root.destroy()
@@ -1564,7 +1581,7 @@ class MediaGrabberApp:
                         self.log_to_terminal(f"🧹 Limpieza: Se eliminaron {deleted} archivos temporales.", "normal")
 
         # Repeat check every 100ms
-        self.root.after(100, self.check_queue)
+        self._queue_after_id = self.root.after(100, self.check_queue)
 
 
 if __name__ == "__main__":

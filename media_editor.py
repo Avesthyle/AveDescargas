@@ -651,6 +651,7 @@ def build_export_plan(
                 v_filters = [
                     f"[{index}:v]trim=start={_number(clip.source_in)}:end={_number(clip.source_out)}",
                     "setpts=PTS-STARTPTS",
+                    f"fps={_number(fps)}",
                 ]
                 d_in, d_out = clamp_fades(clip.fade_in, clip.fade_out, clip.duration)
                 if d_in > 0:

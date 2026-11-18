@@ -878,6 +878,85 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_seek_gap_clears_selection_and_keep_audio_syncs_linked_state(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            v_media = MediaInfo(path="av.mp4", duration=10.0, has_video=True, has_audio=True, width=320, height=180, fps=30.0)
+            c1 = Clip(v_media, source_out=2.0, timeline_start=0.0)
+            c2 = Clip(v_media, source_out=2.0, timeline_start=5.0)
+            panel.project.tracks[0].clips = [c1, c2]
+            panel.selected_clip = c1
+            panel.toggle_linked_media()
+            panel.toggle_clip_audio()
+            self.assertFalse(panel.keep_audio.get())
+            panel.toggle_clip_audio()
+            self.assertTrue(panel.keep_audio.get())
+
+            panel._move_playhead(3.5)
+            self.assertIsNone(panel.selected_clip)
+            self.assertEqual(panel.clip_title_var.get(), "Ningún clip seleccionado")
+            self.assertEqual(panel.preview.cget("text"), "")
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
+    def test_magnetic_trim_respects_independent_audio_neighbor_and_play_done_cleans_up(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            v_track, a_track = panel.project.tracks
+            v_media = MediaInfo(path="av.mp4", duration=10.0, has_video=True, has_audio=True, width=320, height=180, fps=30.0)
+            a_media = audio_media_from_video(v_media)
+            music = MediaInfo(path="music.mp3", duration=10.0, has_video=False, has_audio=True)
+            v1 = Clip(v_media, source_out=3.0, timeline_start=0.0, use_source_audio=False, link_group="g1")
+            a1 = Clip(a_media, source_out=3.0, timeline_start=0.0, link_group="g1")
+            indep = Clip(music, source_out=2.0, timeline_start=4.0)
+            v_track.clips = [v1]
+            a_track.clips = [a1, indep]
+            panel.magnetic_main.set(True)
+            panel.drag_clip = v1
+            panel.resize_side = "right"
+            panel._trim_drag(v_track, panel._x_at_time(6.0), alt=True)
+            self.assertLessEqual(a_track.clips[0].timeline_end, indep.timeline_start + 1e-6)
+            self.assertAlmostEqual(v_track.clips[0].timeline_end, a_track.clips[0].timeline_end, places=5)
+
+            proc = mock.MagicMock()
+            proc.poll.return_value = None
+            panel.audio_process = proc
+            panel._playback_from_timeline = True
+            panel.selected_clip = None
+            panel.frame_token = 7
+            panel.ui_queue.put(("play_done", 7))
+            panel._poll_queue()
+            proc.terminate.assert_called_once()
+            self.assertFalse(panel._playback_from_timeline)
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
+    def test_long_timeline_at_max_zoom_bounds_ruler_canvas_items(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            long_audio = MediaInfo(path="podcast.mp3", duration=7200.0, has_video=False, has_audio=True)
+            panel.project.tracks[1].clips.append(Clip(long_audio, source_out=7200.0, timeline_start=0.0))
+            panel.zoom = 400.0
+            panel.redraw_timeline()
+            self.assertLess(len(panel.timeline.find_withtag("ruler")), 250)
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

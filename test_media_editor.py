@@ -291,6 +291,14 @@ class ExportPlanTests(unittest.TestCase):
             info = probe_media("test.mp4")
         self.assertAlmostEqual(info.duration, 12.5, places=3)
 
+    def test_build_export_plan_normalizes_clip_fps_for_mixed_rates(self):
+        v24 = MediaInfo(path="a24.mp4", duration=4.0, has_video=True, has_audio=False, width=1280, height=720, fps=24.0)
+        v60 = MediaInfo(path="b60.mp4", duration=4.0, has_video=True, has_audio=False, width=1280, height=720, fps=60.0)
+        track = Track("V1", "video", clips=[Clip(v24, source_out=4, timeline_start=0), Clip(v60, source_out=4, timeline_start=4)])
+        plan = build_export_plan(EditorProject([track]), "active", None, "salida.mp4")
+        self.assertEqual(plan["fps"], 60.0)
+        self.assertGreaterEqual(plan["filter_complex"].count("fps=60"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
