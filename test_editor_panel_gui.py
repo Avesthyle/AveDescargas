@@ -828,6 +828,39 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_apply_audio_props_clamps_fades_delete_clears_preview_and_auto_max_res_fps(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            low = MediaInfo(path="low.mp4", duration=4.0, has_video=True, has_audio=False, width=640, height=360, fps=24.0)
+            high = MediaInfo(path="high.mp4", duration=4.0, has_video=True, has_audio=False, width=1920, height=1080, fps=60.0)
+            c1 = Clip(low, source_out=4.0, timeline_start=0.0)
+            c2 = Clip(high, source_out=4.0, timeline_start=4.0)
+            panel.project.tracks[0].clips = [c1, c2]
+            panel.selected_clip = c1
+            panel.fade_in_var.set(3.0)
+            panel.fade_out_var.set(3.0)
+            panel._apply_audio_props()
+            self.assertAlmostEqual(c1.fade_in, 2.0, places=3)
+            self.assertAlmostEqual(c1.fade_out, 2.0, places=3)
+            self.assertAlmostEqual(float(panel.fade_in_var.get()), 2.0, places=3)
+
+            from media_editor import build_export_plan
+            with mock.patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")):
+                plan = build_export_plan(panel.project, "active", 0, "/tmp/out.mp4", resolution="auto")
+            self.assertEqual((plan["width"], plan["height"], plan["fps"]), (1920, 1080, 60.0))
+
+            panel.project.tracks[0].clips = [c1]
+            panel.selected_clip = c1
+            panel.delete_clip()
+            self.assertIn("Abre un vídeo", panel.preview.cget("text"))
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

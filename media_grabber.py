@@ -484,7 +484,6 @@ class YtDlpLogger:
         ui_queue.put({'type': 'log', 'text': msg, 'level': 'error'})
 
 def progress_hook(d):
-    global CANCEL_REQUESTED
     if CANCEL_REQUESTED:
         raise DownloadCancelledException("Cancelado por el usuario")
 
@@ -1210,7 +1209,7 @@ class MediaGrabberApp:
         self.custom_name_var = tk.StringVar()
         self.custom_name_entry = tk.Entry(name_frame, textvariable=self.custom_name_var, font=("Segoe UI", 9), bg="#1e1e1e", fg="#ffffff", insertbackground="#ffffff", relief="flat", bd=0)
         self.custom_name_entry.pack(side="left", fill="x", expand=True, ipady=4, padx=(0, 7))
-        tk.Button(name_frame, text="Obtener título", font=("Segoe UI", 8), bg="#383838", fg="#ffffff", activebackground="#4a4a4a", activeforeground="#ffffff", relief="flat", bd=0, padx=8, command=self.load_title_async).pack(side="right")
+        tk.Button(name_frame, text="Obtener título", font=("Segoe UI", 8), bg="#383838", fg="#ffffff", activebackground="#4a4a4a", activeforeground="#ffffff", relief="flat", bd=0, padx=8, command=lambda: self.load_title_async(force=True)).pack(side="right")
 
         # 4. Action & Progress Panel
         action_frame = tk.Frame(self.bottom_container, bg="#1a1a1a")
@@ -1294,18 +1293,18 @@ class MediaGrabberApp:
             self.settings["download_folder"] = f
             save_settings(SETTINGS_PATH, self.settings)
 
-    def load_title_async(self):
+    def load_title_async(self, force=False):
         urls = [u.strip() for u in self.url_input.get("1.0", tk.END).splitlines() if u.strip()]
         current_name = self.custom_name_var.get().strip()
         if len(urls) != 1 or has_playlist_reference(urls[0]) or not urls[0].startswith("http"):
             self.title_lookup_url = None
-            if current_name == "Obteniendo título…":
+            if force or current_name == "Obteniendo título…":
                 self.custom_name_var.set("")
             return
         url = urls[0]
-        if url == self.title_lookup_url and current_name:
+        if not force and url == self.title_lookup_url and current_name:
             return
-        if current_name and current_name != "Obteniendo título…":
+        if not force and current_name and current_name != "Obteniendo título…":
             self.title_lookup_url = url
             return
         self.title_lookup_url = url
@@ -1324,6 +1323,8 @@ class MediaGrabberApp:
 
     def clear_urls(self):
         self.url_input.delete("1.0", tk.END)
+        self.title_lookup_url = None
+        self.custom_name_var.set("")
 
     def clear_log(self):
         self.terminal.configure(state='normal')
@@ -1366,7 +1367,6 @@ class MediaGrabberApp:
         return targets
 
     def on_download(self):
-        global IS_DOWNLOADING
         if IS_DOWNLOADING:
             return
 

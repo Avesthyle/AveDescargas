@@ -704,6 +704,7 @@ class SimpleEditorPanel(tk.Frame):
                     self._shift_linked_clip(linked, linked.timeline_start - shift)
         self.selected_clip = None
         self._apply_magnetic()
+        self._refresh_preview_at_playhead()
         self._update_inspector()
         self.redraw_timeline()
         self.status.configure(text="Clip eliminado y hueco cerrado.", fg=GREEN)
@@ -928,17 +929,19 @@ class SimpleEditorPanel(tk.Frame):
             return
         try:
             vol = max(0.0, min(2.0, float(self.volume_var.get()) / 100.0))
-            fade_in = max(0.0, min(clip.duration, float(self.fade_in_var.get())))
-            fade_out = max(0.0, min(clip.duration, float(self.fade_out_var.get())))
+            fade_in, fade_out = clamp_fades(float(self.fade_in_var.get()), float(self.fade_out_var.get()), clip.duration)
         except (ValueError, TypeError, tk.TclError):
             return
         if abs(clip.volume - vol) < 1e-4 and abs(clip.fade_in - fade_in) < 1e-4 and abs(clip.fade_out - fade_out) < 1e-4:
             return
         self._push_undo()
         for target in [clip] + self._linked_clips(clip):
+            t_in, t_out = clamp_fades(fade_in, fade_out, target.duration)
             target.volume = vol
-            target.fade_in = min(fade_in, target.duration)
-            target.fade_out = min(fade_out, target.duration)
+            target.fade_in = t_in
+            target.fade_out = t_out
+        self.fade_in_var.set(round(fade_in, 2))
+        self.fade_out_var.set(round(fade_out, 2))
         self.redraw_timeline()
         self.status.configure(text=f"Volumen: {int(round(vol * 100))}% · Fundidos: {fade_in:.2f}s / {fade_out:.2f}s", fg=GREEN)
 
@@ -1351,7 +1354,31 @@ class SimpleEditorPanel(tk.Frame):
         self._apply_magnetic()
         self._update_inspector()
         self.redraw_timeline()
+        if updated.media.has_video:
+            self.request_frame(self.cursor_time)
         self.status.configure(text=f"Clip recortado hasta {format_editor_time(target)}.", fg=GREEN)
+
+    def _refresh_preview_at_playhead(self):
+        _t, active = self._clip_at_playhead()
+        if active and active.media.has_video:
+            self.selected_media = active.media
+            pos = timeline_to_source_time(active, self.playhead_timeline)
+            if pos is not None:
+                self.cursor_time = pos
+                self.request_frame(pos)
+            return
+        if active and not active.media.has_video:
+            self.selected_media = active.media
+            self.preview_photo = None
+            self.preview.configure(image="", text=f"♫  {pathlib.Path(active.media.path).name}")
+            return
+        if not any(t.clips for t in self.project.tracks):
+            self.selected_media = None
+            self.preview_photo = None
+            self.preview.configure(image="", text="Abre un vídeo o una canción")
+        else:
+            self.preview_photo = None
+            self.preview.configure(image="", text="")
 
     def capture_frame(self):
         media = self.selected_media
@@ -2207,6 +2234,7 @@ class SimpleEditorPanel(tk.Frame):
                 track.clips.remove(target)
         self.selected_clip = None
         self._apply_magnetic()
+        self._refresh_preview_at_playhead()
         self._update_inspector()
         self.redraw_timeline()
         self.status.configure(text="Clip eliminado. Ctrl+Z para deshacer · Shift+Supr borra y cierra el hueco.", fg=GREEN)

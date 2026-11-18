@@ -598,15 +598,18 @@ def build_export_plan(
         raise ValueError("La línea de tiempo está vacía.")
 
     video_tracks = [track for track in tracks if track.kind == "video" and track.clips]
-    first_video = next((clip for track in video_tracks for clip in track.clips if clip.media.has_video), None)
+    video_clips = [clip for track in video_tracks for clip in track.clips if clip.media.has_video]
+    first_video = video_clips[0] if video_clips else None
     target_res = EXPORT_RESOLUTIONS.get(resolution)
     if first_video and target_res is not None:
         width, height = target_res
+    elif video_clips:
+        sized = [(c.media.width, c.media.height) for c in video_clips if c.media.width > 0 and c.media.height > 0]
+        width, height = max(sized, key=lambda wh: wh[0] * wh[1]) if sized else (1280, 720)
     else:
-        width = first_video.media.width if first_video and first_video.media.width > 0 else (1280 if first_video else 0)
-        height = first_video.media.height if first_video and first_video.media.height > 0 else (720 if first_video else 0)
-    raw_fps = first_video.media.fps if first_video and first_video.media.fps else 30.0
-    fps = raw_fps if 10.0 <= raw_fps <= 60.0 else 30.0
+        width, height = 0, 0
+    valid_fps = [c.media.fps for c in video_clips if 10.0 <= c.media.fps <= 60.0]
+    fps = max(valid_fps) if valid_fps else 30.0
     if first_video:
         if preview:
             ratio = min(1.0, 854 / max(1, width), 480 / max(1, height))

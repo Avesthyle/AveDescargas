@@ -357,6 +357,17 @@ class PlaylistHandlingTests(unittest.TestCase):
         media_grabber.MediaGrabberApp.check_queue(dummy)
         self.assertEqual(dummy.custom_name_var.get(), "Mi nombre propio")
 
+        from unittest import mock
+        with mock.patch("media_grabber.threading.Thread") as thread_mock:
+            media_grabber.MediaGrabberApp.load_title_async(dummy, force=True)
+        self.assertEqual(dummy.custom_name_var.get(), "Obteniendo título…")
+        thread_mock.assert_called_once()
+
+        dummy.url_input = types.SimpleNamespace(delete=lambda *_a: None)
+        media_grabber.MediaGrabberApp.clear_urls(dummy)
+        self.assertEqual(dummy.custom_name_var.get(), "")
+        self.assertIsNone(dummy.title_lookup_url)
+
 
 if __name__ == "__main__":
     unittest.main()
