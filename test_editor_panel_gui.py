@@ -1688,6 +1688,36 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_relink_syncs_modified_audio_properties_to_inspector(self):
+        root = tk.Tk()
+        root.geometry("1200x800+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            v_media = MediaInfo(path="demo_v.mp4", duration=10.0, has_video=True, has_audio=True, width=640, height=360, fps=30.0)
+            vc = Clip(v_media, source_in=0.0, source_out=6.0, timeline_start=0.0)
+            panel.project.tracks[0].clips.append(vc)
+            panel.selected_clip = vc
+            panel.toggle_linked_media()  # separa audio
+            ac = panel.project.tracks[1].clips[0]
+            panel.toggle_linked_media()  # desvincula
+            ac.volume = 0.25
+            ac.pitch_semitones = 5
+            ac.fade_in = 1.2
+            panel.selected_clip = vc
+            panel.toggle_linked_media()  # revincula
+            self.assertAlmostEqual(vc.volume, 0.25)
+            self.assertEqual(vc.pitch_semitones, 5)
+            self.assertEqual(panel.volume_var.get(), 25)
+            self.assertTrue(panel.pitch_var.get().startswith("+5"))
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

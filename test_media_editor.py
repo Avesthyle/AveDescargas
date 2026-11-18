@@ -511,6 +511,14 @@ class ExportPlanTests(unittest.TestCase):
                 "tracks": [{"name": "V1", "kind": "video", "clips": [{"media_idx": 0, "source_in": 0, "source_out": 2, "timeline_start": 0, "pitch_semitones": True}]}],
             })
 
+    def test_parse_editor_time_rejects_negative_parts_and_waveform_sanitizes_nonfinite(self):
+        with self.assertRaises(ValueError):
+            parse_editor_time("1:-5")
+        with self.assertRaises(ValueError):
+            parse_editor_time("01:-02:03")
+        bars = waveform_from_values([float("nan"), float("inf"), 0.0, 0.5], sample_count=2)
+        self.assertEqual(bars, [0.0, 1.0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -793,6 +793,15 @@ class PlaylistHandlingTests(unittest.TestCase):
             finally:
                 os.chdir(cwd)
 
+    def test_non_dict_entries_in_playlist_and_has_audio(self):
+        import media_grabber
+
+        entries = media_grabber.playlist_entries_from_info({"entries": ["bad", None, {"id": "abc", "title": "Song"}]})
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["title"], "Song")
+        self.assertTrue(media_grabber.has_audio({"entries": ["bad", {"acodec": "aac"}]}))
+        self.assertFalse(media_grabber.has_audio({"requested_formats": [None, {"acodec": "none"}]}))
+
 
 if __name__ == "__main__":
     unittest.main()

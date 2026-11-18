@@ -958,6 +958,9 @@ class SimpleEditorPanel(tk.Frame):
                         link_id = self._new_link_group()
                         clip.link_group = link_id
                         other.link_group = link_id
+                        clip.volume = other.volume
+                        clip.pitch_semitones = other.pitch_semitones
+                        clip.fade_in, clip.fade_out = clamp_fades(other.fade_in, other.fade_out, clip.duration)
                         self._update_inspector()
                         self.status.configure(text="Audio y vídeo vinculados de nuevo.", fg=GREEN)
                         self.redraw_timeline()

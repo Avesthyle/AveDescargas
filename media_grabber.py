@@ -295,12 +295,12 @@ def youtube_extractor_options(fmt: str, include_audio: bool) -> dict:
 
 def has_audio(info) -> bool:
     """Indica si los formatos elegidos por yt-dlp incluyen pista de audio."""
-    if not info:
+    if not isinstance(info, dict):
         return True
     if info.get("entries"):
-        return all(has_audio(e) for e in info["entries"] if e)
+        return all(has_audio(e) for e in info["entries"] if isinstance(e, dict))
     formats = info.get("requested_formats") or [info]
-    return any(f.get("acodec") != "none" for f in formats)
+    return any(isinstance(f, dict) and f.get("acodec") != "none" for f in formats)
 
 # --- Custom Exception for Cancellation ---
 class DownloadCancelledException(Exception):
@@ -437,8 +437,9 @@ def build_output_template(output_dir: str, target):
 def playlist_entries_from_info(info):
     """Normaliza las entradas planas devueltas por yt-dlp."""
     entries = []
-    for entry in (info or {}).get("entries") or []:
-        if not entry:
+    raw_entries = info.get("entries") if isinstance(info, dict) else None
+    for entry in raw_entries or []:
+        if not isinstance(entry, dict):
             continue
         entry_id = entry.get("id")
         entry_url = entry.get("webpage_url")

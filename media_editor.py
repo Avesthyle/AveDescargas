@@ -61,7 +61,7 @@ def parse_editor_time(value) -> float:
             numbers = [float(part) for part in parts]
         except ValueError as exc:
             raise ValueError("Usa segundos, MM:SS o HH:MM:SS.") from exc
-        if any(not math.isfinite(part) for part in numbers):
+        if any(not math.isfinite(part) or part < 0 for part in numbers):
             raise ValueError("Usa segundos, MM:SS o HH:MM:SS.")
         if len(numbers) == 1:
             result = numbers[0]
@@ -452,7 +452,7 @@ def waveform_from_values(values: list[float], sample_count: int = 240) -> list[f
     chunk = max(1, len(values) // sample_count)
     rms = []
     for index in range(0, len(values), chunk):
-        section = values[index:index + chunk]
+        section = [float(value) if math.isfinite(value) else 0.0 for value in values[index:index + chunk]]
         rms.append(min(1.0, math.sqrt(sum(value * value for value in section) / max(1, len(section)))))
     peak = max(rms, default=0.0)
     if peak > 0:
