@@ -14,8 +14,10 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from media_editor import (
     Clip,
     EditorProject,
+    MIN_CLIP_DURATION,
     Track,
     build_export_plan,
+    clamp_fades,
     discover_ffmpeg_tools,
     format_editor_time,
     parse_editor_time,
@@ -296,11 +298,14 @@ class EditorPanel(tk.Frame):
             new_start = parse_editor_time(self.start_var.get())
             if new_out <= new_in:
                 raise ValueError("La salida debe ser posterior a la entrada.")
+            if new_out - new_in < MIN_CLIP_DURATION:
+                raise ValueError("El clip debe durar al menos 0,01 s.")
             if new_out > clip.media.duration + 0.05:
                 raise ValueError("La salida supera la duración del archivo.")
             clip.source_in = new_in
             clip.source_out = new_out
             clip.timeline_start = new_start
+            clip.fade_in, clip.fade_out = clamp_fades(clip.fade_in, clip.fade_out, clip.duration)
             clip.use_source_audio = bool(self.clip_audio_var.get())
             self.refresh_clips()
             self.redraw_timeline()
@@ -383,9 +388,10 @@ class EditorPanel(tk.Frame):
         label_width = 105
         duration = max(30.0, self.project.duration() + 5)
         total_width = label_width + duration * px
+        total_height = max(165, 25 + len(self.project.tracks) * row_height)
         for second in range(0, int(duration) + 1, 5):
             x = label_width + second * px
-            self.timeline.create_line(x, 0, x, max(165, len(self.project.tracks) * row_height), fill="#2e2e2e")
+            self.timeline.create_line(x, 0, x, total_height, fill="#2e2e2e")
             self.timeline.create_text(x + 3, 8, text=format_editor_time(second), fill=MUTED, anchor="nw", font=("Segoe UI", 7))
         for row, track in enumerate(self.project.tracks):
             y1 = 22 + row * row_height
@@ -406,7 +412,7 @@ class EditorPanel(tk.Frame):
                 text_item = self.timeline.create_text(x1 + 5, (y1 + y2) / 2, text=clip.name, fill=TEXT, anchor="w", font=("Segoe UI", 8), tags=("clip_text",))
                 self.timeline_items[item] = (track, clip)
                 self.timeline_items[text_item] = (track, clip)
-        self.timeline.configure(scrollregion=(0, 0, total_width, max(165, 25 + len(self.project.tracks) * row_height)))
+        self.timeline.configure(scrollregion=(0, 0, total_width, total_height))
 
     def _timeline_press(self, event):
         x = self.timeline.canvasx(event.x)
@@ -452,7 +458,7 @@ class EditorPanel(tk.Frame):
     def preview(self):
         folder = os.path.join(tempfile.gettempdir(), "AveDescargas")
         os.makedirs(folder, exist_ok=True)
-        output = os.path.join(folder, "previsualizacion.mp4")
+        output = os.path.join(folder, f"previsualizacion{self._default_extension()}")
         self._start_export(output, preview=True)
 
     def export(self):
@@ -524,7 +530,10 @@ class EditorPanel(tk.Frame):
                     if preview:
                         try:
                             ffplay = discover_ffmpeg_tools()[2]
-                            subprocess.Popen([ffplay, "-autoexit", "-window_title", "AveDescargas - Previsualización", path])
+                            subprocess.Popen(
+                                [ffplay, "-autoexit", "-window_title", "AveDescargas - Previsualización", path],
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                            )
                         except Exception as exc:
                             messagebox.showerror("No se pudo reproducir", str(exc))
                     else:

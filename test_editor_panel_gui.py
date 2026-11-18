@@ -1583,6 +1583,55 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_fallback_editor_audio_preview_and_property_validation(self):
+        from editor_panel import EditorPanel
+
+        root = tk.Tk()
+        panel = EditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            track = panel.add_track("audio", "Audio 1")
+            audio = MediaInfo(path="song.mp3", duration=10.0, has_video=False, has_audio=True)
+            clip = Clip(audio, source_in=0.0, source_out=5.0, timeline_start=0.0, fade_in=2.0, fade_out=2.0)
+            track.clips.append(clip)
+            panel.selected_clip = clip
+            panel.refresh()
+            panel._load_clip_properties()
+
+            # 1. preview() en proyecto solo audio usa extensión de audio (.mp3) y pasa build_export_plan
+            captured = {}
+            def fake_start(output, preview):
+                captured["output"] = output
+                captured["preview"] = preview
+                from media_editor import build_export_plan
+                captured["plan"] = build_export_plan(panel.project, panel._mode_key(), panel.project.selected_track_index, output, preview=preview)
+            with mock.patch("editor_panel.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+                 mock.patch.object(panel, "_start_export", side_effect=fake_start):
+                panel.preview()
+            self.assertTrue(captured["output"].endswith("previsualizacion.mp3"))
+            self.assertFalse(captured["plan"]["has_video"])
+
+            # 2. apply_clip_properties rechaza duraciones < 0.01 s y ajusta fades al acortar
+            panel.in_var.set("1.0")
+            panel.out_var.set("1.005")
+            with mock.patch("editor_panel.messagebox.showerror") as show_err:
+                panel.apply_clip_properties()
+                show_err.assert_called_once()
+            self.assertAlmostEqual(clip.source_out, 5.0)
+
+            panel.in_var.set("0.0")
+            panel.out_var.set("1.0")
+            panel.apply_clip_properties()
+            self.assertAlmostEqual(clip.duration, 1.0)
+            self.assertLessEqual(clip.fade_in + clip.fade_out, 1.0 + 1e-6)
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
