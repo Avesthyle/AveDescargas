@@ -308,8 +308,11 @@ class DownloadCancelledException(Exception):
 
 # --- Helpers ---
 def is_valid_http_url(url: str) -> bool:
+    raw = (url or "").strip()
+    if not raw or any(ch.isspace() for ch in raw):
+        return False
     try:
-        parsed = urlparse((url or "").strip())
+        parsed = urlparse(raw)
     except ValueError:
         return False
     return parsed.scheme.lower() in ("http", "https") and bool(parsed.netloc)
@@ -1580,14 +1583,22 @@ class MediaGrabberApp:
         if len(download_targets) == 1:
             raw_custom = self.custom_name_var.get().strip()
             auto_val = getattr(self, "_auto_title_value", None)
-            if auto_val and raw_custom == auto_val and download_targets[0]["url"] != self.title_lookup_url:
+            if download_targets[0]["url"] != getattr(self, "title_lookup_url", None):
+                self.title_lookup_url = None
+                if raw_custom == "Obteniendo título…" or (auto_val and raw_custom == auto_val):
+                    self.custom_name_var.set("")
+                    self._auto_title_value = None
+                    raw_custom = ""
+            custom_name = sanitize_output_name(raw_custom)
+            if custom_name and raw_custom != "Obteniendo título…":
+                download_targets[0]["custom_name"] = custom_name
+        else:
+            self.title_lookup_url = None
+            raw_custom = self.custom_name_var.get().strip()
+            auto_val = getattr(self, "_auto_title_value", None)
+            if raw_custom == "Obteniendo título…" or (auto_val and raw_custom == auto_val):
                 self.custom_name_var.set("")
                 self._auto_title_value = None
-                self.title_lookup_url = None
-            else:
-                custom_name = sanitize_output_name(raw_custom)
-                if custom_name and raw_custom != "Obteniendo título…":
-                    download_targets[0]["custom_name"] = custom_name
 
         fmt = self.fmt_var.get()
         video_quality = self.quality_var.get()

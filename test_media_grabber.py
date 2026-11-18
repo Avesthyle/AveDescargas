@@ -802,6 +802,65 @@ class PlaylistHandlingTests(unittest.TestCase):
         self.assertTrue(media_grabber.has_audio({"entries": ["bad", {"acodec": "aac"}]}))
         self.assertFalse(media_grabber.has_audio({"requested_formats": [None, {"acodec": "none"}]}))
 
+    def test_whitespace_url_rejection_and_stale_title_reset(self):
+        import tempfile
+        import types
+        from unittest import mock
+        import media_grabber
+
+        self.assertFalse(media_grabber.is_valid_http_url("https://youtube.com/watch?v=1 https://youtube.com/watch?v=2"))
+        self.assertFalse(media_grabber.is_valid_http_url("https://youtube.com/watch?v=1\t2"))
+
+        prev_downloading = media_grabber.IS_DOWNLOADING
+        prev_cancel = media_grabber.CANCEL_REQUESTED
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                media_grabber.IS_DOWNLOADING = False
+                media_grabber.CANCEL_REQUESTED = False
+                spawned = {}
+
+                class DummyVar:
+                    def __init__(self, val):
+                        self._val = val
+                    def get(self):
+                        return self._val
+                    def set(self, val):
+                        self._val = val
+
+                class DummyThread:
+                    def __init__(self, target=None, args=(), daemon=False):
+                        spawned["targets"] = args[0]
+                    def start(self):
+                        pass
+
+                dummy = types.SimpleNamespace(
+                    url_input=types.SimpleNamespace(get=lambda *_a: "https://example.com/new\n"),
+                    clip_enabled_var=types.SimpleNamespace(get=lambda: False),
+                    resolve_download_targets=lambda u: [{"url": u[0], "allow_playlist": False}],
+                    folder_var=DummyVar(tmp),
+                    settings={},
+                    custom_name_var=DummyVar("Obteniendo título…"),
+                    _auto_title_value=None,
+                    title_lookup_url="https://example.com/old",
+                    fmt_var=DummyVar("mp4"),
+                    quality_var=DummyVar("1080p (Full HD)"),
+                    video_audio_var=DummyVar("with_audio"),
+                    progress_bar={"value": 0},
+                    lbl_status=types.SimpleNamespace(configure=lambda **_kw: None),
+                    clear_log=lambda: None,
+                    log_to_terminal=lambda *_a: None,
+                    btn_download=types.SimpleNamespace(configure=lambda **_kw: None),
+                )
+                with mock.patch("media_grabber.threading.Thread", DummyThread), \
+                     mock.patch("media_grabber.save_settings"):
+                    media_grabber.MediaGrabberApp.on_download(dummy)
+                self.assertIsNone(dummy.title_lookup_url)
+                self.assertEqual(dummy.custom_name_var.get(), "")
+                self.assertNotIn("custom_name", spawned["targets"][0])
+        finally:
+            media_grabber.IS_DOWNLOADING = prev_downloading
+            media_grabber.CANCEL_REQUESTED = prev_cancel
+
 
 if __name__ == "__main__":
     unittest.main()

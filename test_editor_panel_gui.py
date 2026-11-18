@@ -1849,6 +1849,19 @@ class EditorEndToEndTests(unittest.TestCase):
             panel.playing = True
             panel._move_playhead(0.0)
             self.assertFalse(panel.playing)
+
+            # 5. _next_clip_after omite pistas de audio silenciadas y clips con audio OFF
+            a_track1 = panel.project.tracks[1]
+            a_track2 = panel.add_track("audio", select=False)
+            a_track2.muted = True
+            c_audible = Clip(am, 0.0, 2.0, 3.0)
+            c_muted_track = Clip(am, 0.0, 2.0, 3.0)
+            c_silenced = Clip(am, 0.0, 2.0, 1.0, use_source_audio=False)
+            a_track1.clips = [c_silenced, c_audible]
+            a_track2.clips = [c_muted_track]
+            nt, nc = panel._next_clip_after(0.0)
+            self.assertIs(nt, a_track1)
+            self.assertIs(nc, c_audible)
         finally:
             panel.destroy()
             panel = None

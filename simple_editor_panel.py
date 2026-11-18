@@ -1742,10 +1742,12 @@ class SimpleEditorPanel(tk.Frame):
         """Devuelve el siguiente (track, clip) activo en o después de at_time."""
         pos = float(at_time)
         ordered = [t for t in reversed(self.project.tracks) if t.enabled and t.kind == "video"]
-        ordered += [t for t in reversed(self.project.tracks) if t.enabled and t.kind == "audio"]
+        ordered += [t for t in reversed(self.project.tracks) if t.enabled and not t.muted and t.kind == "audio"]
         best = None
         for priority, track in enumerate(ordered):
             for clip in track.clips:
+                if track.kind == "audio" and not clip.use_source_audio:
+                    continue
                 if clip.timeline_end <= pos + 1e-6:
                     continue
                 effective = max(pos, clip.timeline_start)
