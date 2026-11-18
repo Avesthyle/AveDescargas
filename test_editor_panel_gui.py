@@ -1718,6 +1718,74 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_equal_clip_copies_keep_identity_and_set_zoom_ignores_nonfinite(self):
+        from editor_panel import EditorPanel
+
+        root = tk.Tk()
+        root.geometry("1200x800+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            a_media = MediaInfo(path="sfx.mp3", duration=6.0, has_video=False, has_audio=True)
+            t1 = panel.project.tracks[1]
+            t2 = panel.add_track("audio", select=False)
+            c1 = Clip(a_media, source_in=0.0, source_out=3.0, timeline_start=0.0)
+            c2 = Clip(a_media, source_in=0.0, source_out=3.0, timeline_start=0.0)
+            self.assertEqual(c1, c2)
+            t1.clips = [c1]
+            t2.clips = [c2]
+
+            self.assertIs(panel._track_of(c2), t2)
+            panel.project.selected_track_index = panel.project.tracks.index(t2)
+            panel.selected_clip = c2
+            panel.playhead_timeline = 1.5
+            panel.split_at_playhead()
+            self.assertEqual(len(t1.clips), 1)
+            self.assertIs(t1.clips[0], c1)
+            self.assertEqual(len(t2.clips), 2)
+
+            target_right = t2.clips[1]
+            panel.selected_clip = target_right
+            panel.delete_clip()
+            self.assertEqual(len(t1.clips), 1)
+            self.assertIs(t1.clips[0], c1)
+            self.assertEqual(len(t2.clips), 1)
+
+            # set_zoom con NaN o Inf conserva el zoom actual
+            panel.set_zoom(40.0)
+            panel.set_zoom(float("nan"))
+            self.assertAlmostEqual(panel.zoom, 40.0)
+            panel.set_zoom(float("inf"))
+            self.assertAlmostEqual(panel.zoom, 40.0)
+
+            # EditorPanel también identifica los clips por identidad aunque sean iguales
+            fb = EditorPanel(root)
+            try:
+                ft1 = fb.add_track("audio", "Audio 1")
+                ft2 = fb.add_track("audio", "Audio 2")
+                fc1 = Clip(a_media, source_in=0.0, source_out=4.0, timeline_start=0.0)
+                fc2 = Clip(a_media, source_in=0.0, source_out=4.0, timeline_start=0.0)
+                ft1.clips = [fc1]
+                ft2.clips = [fc2]
+                fb.project.selected_track_index = fb.project.tracks.index(ft2)
+                fb.selected_clip = fc1  # pertenece a ft1, no a ft2
+                fb.delete_clip()
+                self.assertEqual(len(ft1.clips), 1)
+                self.assertEqual(len(ft2.clips), 1)
+                fb.selected_clip = fc2
+                fb.delete_clip()
+                self.assertEqual(len(ft1.clips), 1)
+                self.assertEqual(len(ft2.clips), 0)
+            finally:
+                fb.destroy()
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

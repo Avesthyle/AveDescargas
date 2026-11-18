@@ -519,6 +519,22 @@ class ExportPlanTests(unittest.TestCase):
         bars = waveform_from_values([float("nan"), float("inf"), 0.0, 0.5], sample_count=2)
         self.assertEqual(bars, [0.0, 1.0])
 
+    def test_ripple_delete_targets_exact_clip_identity_when_equal_copy_exists(self):
+        from media_editor import ripple_delete
+
+        a = audio_info("sfx.mp3", duration=4.0)
+        c1 = Clip(a, source_in=0.0, source_out=2.0, timeline_start=0.0)
+        c2 = Clip(a, source_in=0.0, source_out=2.0, timeline_start=0.0)
+        c3 = Clip(a, source_in=0.0, source_out=1.0, timeline_start=3.0)
+        clips = [c1, c2, c3]
+        self.assertEqual(c1, c2)
+        shift = ripple_delete(clips, c2)
+        self.assertAlmostEqual(shift, 2.0)
+        self.assertEqual(len(clips), 2)
+        self.assertIs(clips[0], c1)
+        self.assertIs(clips[1], c3)
+        self.assertAlmostEqual(c3.timeline_start, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

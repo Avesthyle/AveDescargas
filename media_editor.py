@@ -229,9 +229,10 @@ def close_gap(clips: list[Clip], time: float) -> float:
 
 def ripple_delete(clips: list[Clip], clip: Clip) -> float:
     """Elimina ``clip`` y junta los clips posteriores para no dejar hueco."""
-    if clip not in clips:
+    index = next((i for i, item in enumerate(clips) if item is clip), None)
+    if index is None:
         return 0.0
-    clips.remove(clip)
+    clips.pop(index)
     shift = clip.duration
     for other in clips:
         if other.timeline_start >= clip.timeline_end - 1e-6:

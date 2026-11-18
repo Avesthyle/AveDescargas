@@ -316,7 +316,8 @@ class EditorPanel(tk.Frame):
     def split_clip(self):
         clip = self.selected_clip
         track = self._current_track()
-        if not clip or not track or clip not in track.clips:
+        clip_index = next((i for i, item in enumerate(track.clips) if item is clip), None) if (clip and track) else None
+        if clip_index is None:
             return
         value = simpledialog.askstring(
             "Dividir clip",
@@ -335,8 +336,7 @@ class EditorPanel(tk.Frame):
             if parts is None:
                 raise ValueError("El corte debe dejar dos partes de al menos 0,01 s.")
             left, right = parts
-            index = track.clips.index(clip)
-            track.clips[index:index + 1] = [left, right]
+            track.clips[clip_index:clip_index + 1] = [left, right]
             self.selected_clip = right
             self.refresh_clips()
             self.redraw_timeline()
@@ -346,8 +346,9 @@ class EditorPanel(tk.Frame):
 
     def delete_clip(self):
         track = self._current_track()
-        if track and self.selected_clip in track.clips:
-            track.clips.remove(self.selected_clip)
+        clip_index = next((i for i, item in enumerate(track.clips) if item is self.selected_clip), None) if (track and self.selected_clip) else None
+        if clip_index is not None:
+            track.clips.pop(clip_index)
             self.selected_clip = None
             self.refresh_clips()
             self.redraw_timeline()

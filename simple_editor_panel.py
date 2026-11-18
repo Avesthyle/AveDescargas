@@ -530,7 +530,13 @@ class SimpleEditorPanel(tk.Frame):
 
     def set_zoom(self, value, anchor_time=None, anchor_offset=None):
         old_zoom = self.zoom
-        self.zoom = max(2.0, min(400.0, float(value)))
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            parsed = old_zoom
+        if not math.isfinite(parsed):
+            parsed = old_zoom
+        self.zoom = max(2.0, min(400.0, parsed))
         if anchor_time is None:
             anchor_time = self.playhead_timeline
         self.redraw_timeline()
@@ -611,8 +617,18 @@ class SimpleEditorPanel(tk.Frame):
     # Edición magnética
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _clip_index(track, clip):
+        return next((i for i, item in enumerate(track.clips) if item is clip), None)
+
+    @classmethod
+    def _remove_clip_from_track(cls, track, clip):
+        index = cls._clip_index(track, clip)
+        if index is not None:
+            track.clips.pop(index)
+
     def _track_of(self, clip):
-        return next((track for track in self.project.tracks if clip in track.clips), None)
+        return next((track for track in self.project.tracks if any(item is clip for item in track.clips)), None)
 
     def _linked_clips(self, clip):
         if not clip or not clip.link_group:
@@ -646,7 +662,7 @@ class SimpleEditorPanel(tk.Frame):
         )
         if not alt_track:
             alt_track = self.add_track(current_track.kind, record_undo=False, select=False)
-        current_track.clips.remove(linked)
+        self._remove_clip_from_track(current_track, linked)
         alt_track.clips.append(linked)
         linked.timeline_start = wanted
 
@@ -699,10 +715,12 @@ class SimpleEditorPanel(tk.Frame):
         else:
             track = self.project.selected_track()
             if track:
+                seen_ids = set()
                 for clip in track.clips:
                     if clip.timeline_start < time_point < clip.timeline_end:
                         for item in [clip] + self._linked_clips(clip):
-                            if item not in targets:
+                            if id(item) not in seen_ids:
+                                seen_ids.add(id(item))
                                 targets.append(item)
         targets = [clip for clip in targets if split_clip(clip, time_point) is not None]
         if not targets:
@@ -718,7 +736,7 @@ class SimpleEditorPanel(tk.Frame):
             left, right = split_clip(clip, time_point)
             if clip.link_group:
                 right.link_group = group_map[clip.link_group]
-            index = track.clips.index(clip)
+            index = self._clip_index(track, clip)
             track.clips[index:index + 1] = [left, right]
             if clip is self.selected_clip:
                 self.selected_clip = left
@@ -740,7 +758,7 @@ class SimpleEditorPanel(tk.Frame):
         for linked in self._linked_clips(clip):
             linked_track = self._track_of(linked)
             if linked_track:
-                linked_track.clips.remove(linked)
+                self._remove_clip_from_track(linked_track, linked)
         moved = [other for other in track.clips if other is not clip and other.timeline_start >= clip.timeline_end - 1e-6]
         shift = ripple_delete(track.clips, clip)
         if shift > 0:
@@ -2032,13 +2050,14 @@ class SimpleEditorPanel(tk.Frame):
             if linked_pieces and linked_track:
                 if new_group:
                     linked_pieces[1].link_group = new_group
-                index = linked_track.clips.index(linked)
-                linked_track.clips[index:index + 1] = list(linked_pieces)
+                index = self._clip_index(linked_track, linked)
+                if index is not None:
+                    linked_track.clips[index:index + 1] = list(linked_pieces)
         if new_group:
             pieces[1].link_group = new_group
         for track in self.project.tracks:
-            if clip in track.clips:
-                index = track.clips.index(clip)
+            index = self._clip_index(track, clip)
+            if index is not None:
                 track.clips[index:index + 1] = list(pieces)
                 self.selected_clip = pieces[0]
                 self.playhead_timeline = timeline_cut
@@ -2051,8 +2070,9 @@ class SimpleEditorPanel(tk.Frame):
                 return
 
     def _replace_clip(self, track, old_clip, new_clip):
-        index = track.clips.index(old_clip)
-        track.clips[index] = new_clip
+        index = self._clip_index(track, old_clip)
+        if index is not None:
+            track.clips[index] = new_clip
         self.selected_clip = new_clip
         self.drag_clip = new_clip
 
@@ -2328,11 +2348,14 @@ class SimpleEditorPanel(tk.Frame):
     def _replace_linked(self, old_clip, new_clip):
         track = self._track_of(old_clip)
         if track:
-            track.clips[track.clips.index(old_clip)] = new_clip
+            index = self._clip_index(track, old_clip)
+            if index is not None:
+                track.clips[index] = new_clip
 
     def _trim_drag(self, track, x, alt):
         clip = self.drag_clip
         linked = self._linked_clips(clip)
+        linked_ids = {id(item) for item in linked}
         main_track = self._main_track()
         is_magnetic_main = self.magnetic_main.get() and (
             track is main_track or any(self._track_of(o) is main_track for o in linked)
@@ -2345,7 +2368,7 @@ class SimpleEditorPanel(tk.Frame):
                 if other_track:
                     neighbors.extend(
                         item.timeline_end for item in other_track.clips
-                        if item is not other and item not in linked and item.timeline_end <= other.timeline_start + 0.001
+                        if item is not other and id(item) not in linked_ids and item.timeline_end <= other.timeline_start + 0.001
                     )
             if neighbors:
                 boundary = max(boundary, max(neighbors))
@@ -2379,7 +2402,7 @@ class SimpleEditorPanel(tk.Frame):
                     continue
                 neighbors.extend(
                     item.timeline_start for item in other_track.clips
-                    if item is not other and item not in linked
+                    if item is not other and id(item) not in linked_ids
                     and not (is_magnetic_main and item.link_group in main_groups)
                     and item.timeline_start >= other.timeline_end - 0.001
                 )
@@ -2416,6 +2439,7 @@ class SimpleEditorPanel(tk.Frame):
             if candidate.kind == track.kind and candidate is not track:
                 target_track = candidate
         linked = self._linked_clips(clip)
+        linked_ids = {id(item) for item in linked}
         main_track = self._main_track()
         free_move = self.magnetic_main.get() and (
             target_track is main_track
@@ -2439,7 +2463,7 @@ class SimpleEditorPanel(tk.Frame):
             ranges = [
                 (item.timeline_start, item.timeline_end)
                 for item in other_track.clips
-                if item is not other and item not in linked and not (free_move and item.link_group in main_groups)
+                if item is not other and id(item) not in linked_ids and not (free_move and item.link_group in main_groups)
             ]
             wanted = other.timeline_start + delta
             if wanted < -1e-6 or abs(avoid_clip_overlap(wanted, other.duration, ranges) - wanted) > 1e-6:
@@ -2448,7 +2472,7 @@ class SimpleEditorPanel(tk.Frame):
                 self.status.configure(text="El audio vinculado chocaría con otro clip; desvincúlalo para moverlo por separado.", fg=YELLOW)
                 return
         if target_track is not track:
-            track.clips.remove(clip)
+            self._remove_clip_from_track(track, clip)
             target_track.clips.append(clip)
             self.drag_track = target_track
             self.project.selected_track_index = self.project.tracks.index(target_track)
@@ -2544,7 +2568,7 @@ class SimpleEditorPanel(tk.Frame):
         for target in [clip] + self._linked_clips(clip):
             track = self._track_of(target)
             if track:
-                track.clips.remove(target)
+                self._remove_clip_from_track(track, target)
         self.selected_clip = None
         self._apply_magnetic()
         total = self.project.duration()
