@@ -361,6 +361,40 @@ class ExportPlanTests(unittest.TestCase):
                 run_export({"command": ["ffmpeg"], "output_path": "/tmp/out_abort.mp4"}, lambda _l: (_ for _ in ()).throw(RuntimeError("abort")))
         self.assertEqual(terminated, [True])
 
+    def test_pitch_resamples_first_fps_handles_zero_and_project_validation(self):
+        import os
+        from media_editor import _parse_fps, project_from_dict, save_project, load_project
+
+        pf = build_pitch_filter(4)
+        self.assertTrue(pf.startswith("aresample=44100,asetrate=44100*"))
+
+        self.assertEqual(_parse_fps("30/0"), 0.0)
+        self.assertEqual(_parse_fps("N/A"), 0.0)
+
+        vtrack = Track("V1", "video", clips=[Clip(video_info("v.mp4"), source_out=5)])
+        for ext in (".m4a", ".flac", ".ogg"):
+            with self.assertRaisesRegex(ValueError, "MP4"):
+                build_export_plan(EditorProject([vtrack]), "active", None, f"out{ext}")
+
+        atrack = Track("A1", "audio", clips=[Clip(audio_info("a.mp3"), source_out=5)])
+        flac_plan = build_export_plan(EditorProject([atrack]), "active", None, "out.flac")
+        ogg_plan = build_export_plan(EditorProject([atrack]), "active", None, "out.ogg")
+        self.assertIn("flac", flac_plan["command"])
+        self.assertIn("libopus", ogg_plan["command"])
+
+        with self.assertRaises(ValueError):
+            project_from_dict({"media": [{"path": "x.mp4"}], "tracks": []})
+        proj, heights, _ = project_from_dict({"media": [], "tracks": [], "track_heights": ["bad"]})
+        self.assertEqual(heights, {})
+
+        with tempfile.TemporaryDirectory() as folder:
+            proj_path = os.path.join(folder, "sub", "demo.avep")
+            save_project(proj_path, EditorProject([atrack]), {"A1": 70.0})
+            self.assertFalse(os.path.exists(f"{proj_path}.tmp"))
+            loaded, loaded_h, _ = load_project(proj_path)
+            self.assertEqual(len(loaded.tracks), 1)
+            self.assertEqual(loaded_h["A1"], 70.0)
+
 
 if __name__ == "__main__":
     unittest.main()

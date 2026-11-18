@@ -92,9 +92,11 @@ def build_pitch_filter(semitones: int, sample_rate: int = 44100) -> Optional[str
     factor = pitch_factor(value)
     if value == 0:
         return None
+    rate = int(sample_rate)
     return (
-        f"asetrate={int(sample_rate)}*{factor:.9f},"
-        f"aresample={int(sample_rate)},atempo={1.0 / factor:.9f}"
+        f"aresample={rate},"
+        f"asetrate={rate}*{factor:.9f},"
+        f"aresample={rate},atempo={1.0 / factor:.9f}"
     )
 
 
@@ -499,10 +501,16 @@ class EditorProject:
 def _parse_fps(value: str) -> float:
     if not value or value == "0/0":
         return 0.0
-    if "/" in value:
-        numerator, denominator = value.split("/", 1)
-        return float(numerator) / float(denominator or 1)
-    return float(value)
+    try:
+        if "/" in value:
+            numerator, denominator = value.split("/", 1)
+            denom = float(denominator)
+            if denom == 0.0:
+                return 0.0
+            return float(numerator) / denom
+        return float(value)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
 
 
 def discover_ffmpeg_tools() -> tuple[str, str, str]:
@@ -731,11 +739,12 @@ def build_export_plan(
         )
 
     extension = pathlib.Path(output_path).suffix.lower()
-    if first_video and extension in {".mp3", ".wav"}:
+    audio_only_extensions = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+    if first_video and extension in audio_only_extensions:
         raise ValueError("Elige MP4, MOV, MKV o WEBM para exportar vídeo.")
     if not first_video and not final_audio:
         raise ValueError("No hay pistas de vídeo ni de audio activas para exportar (revisa si están silenciadas).")
-    if not first_video and extension not in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}:
+    if not first_video and extension not in audio_only_extensions:
         raise ValueError("Elige un formato de audio para un proyecto sin vídeo.")
 
     command = [discover_ffmpeg_tools()[0], "-y"]
@@ -762,6 +771,10 @@ def build_export_plan(
             command += ["-c:a", "pcm_s16le"]
         elif extension == ".mp3":
             command += ["-c:a", "libmp3lame", "-b:a", "320k"]
+        elif extension == ".flac":
+            command += ["-c:a", "flac"]
+        elif extension == ".ogg":
+            command += ["-c:a", "libopus", "-b:a", "192k"]
         else:
             command += ["-c:a", "aac", "-b:a", "256k"]
         command += ["-t", _number(duration)]
@@ -889,56 +902,94 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
     """Reconstruye (EditorProject, track_heights, media_list) desde un diccionario JSON."""
     if not isinstance(data, dict):
         raise ValueError("El archivo de proyecto no tiene un formato JSON válido.")
-    media_list = [
-        MediaInfo(
-            path=m["path"],
-            duration=float(m["duration"]),
-            has_video=bool(m["has_video"]),
-            has_audio=bool(m["has_audio"]),
-            width=int(m.get("width") or 0),
-            height=int(m.get("height") or 0),
-            fps=float(m.get("fps") or 0.0),
-            format_name=str(m.get("format_name") or ""),
-            video_codec=m.get("video_codec"),
-            audio_codec=m.get("audio_codec"),
-        )
-        for m in data.get("media", [])
-    ]
+    raw_media = data.get("media", [])
+    raw_tracks = data.get("tracks", [])
+    if not isinstance(raw_media, list) or not isinstance(raw_tracks, list):
+        raise ValueError("El archivo de proyecto no tiene un formato JSON válido.")
+    media_list = []
+    for m in raw_media:
+        if not isinstance(m, dict):
+            raise ValueError("El archivo de proyecto contiene medios no válidos.")
+        try:
+            media_list.append(
+                MediaInfo(
+                    path=str(m["path"]),
+                    duration=float(m["duration"]),
+                    has_video=bool(m["has_video"]),
+                    has_audio=bool(m["has_audio"]),
+                    width=int(m.get("width") or 0),
+                    height=int(m.get("height") or 0),
+                    fps=float(m.get("fps") or 0.0),
+                    format_name=str(m.get("format_name") or ""),
+                    video_codec=m.get("video_codec"),
+                    audio_codec=m.get("audio_codec"),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("El archivo de proyecto contiene metadatos de medio dañados.") from exc
     tracks = []
-    for t in data.get("tracks", []):
+    for t in raw_tracks:
+        if not isinstance(t, dict):
+            raise ValueError("El archivo de proyecto contiene pistas no válidas.")
+        raw_clips = t.get("clips", [])
+        if not isinstance(raw_clips, list):
+            raise ValueError("El archivo de proyecto contiene clips no válidos.")
         clips = []
-        for c in t.get("clips", []):
-            media_idx = int(c["media_idx"])
+        for c in raw_clips:
+            if not isinstance(c, dict):
+                raise ValueError("El archivo de proyecto contiene clips no válidos.")
+            try:
+                media_idx = int(c["media_idx"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("El archivo de proyecto tiene un índice de archivo inválido.") from exc
             if not 0 <= media_idx < len(media_list):
                 raise ValueError(f"Índice de archivo inválido en proyecto: {media_idx}")
             base_media = media_list[media_idx]
-            clip_has_video = c.get("clip_has_video", t["kind"] == "video" and base_media.has_video)
+            track_kind = t.get("kind")
+            clip_has_video = c.get("clip_has_video", track_kind == "video" and base_media.has_video)
             clip_media = base_media if (clip_has_video or not base_media.has_video) else audio_media_from_video(base_media)
-            clips.append(Clip(
-                media=clip_media,
-                source_in=c["source_in"],
-                source_out=c["source_out"],
-                timeline_start=c["timeline_start"],
-                use_source_audio=bool(c.get("use_source_audio", True)),
-                name=str(c.get("name") or ""),
-                pitch_semitones=int(c.get("pitch_semitones") or 0),
-                link_group=c.get("link_group"),
-                volume=float(1.0 if c.get("volume") is None else c.get("volume")),
-                fade_in=float(c.get("fade_in") or 0.0),
-                fade_out=float(c.get("fade_out") or 0.0),
+            try:
+                clips.append(Clip(
+                    media=clip_media,
+                    source_in=c["source_in"],
+                    source_out=c["source_out"],
+                    timeline_start=c["timeline_start"],
+                    use_source_audio=bool(c.get("use_source_audio", True)),
+                    name=str(c.get("name") or ""),
+                    pitch_semitones=int(c.get("pitch_semitones") or 0),
+                    link_group=c.get("link_group"),
+                    volume=float(1.0 if c.get("volume") is None else c.get("volume")),
+                    fade_in=float(c.get("fade_in") or 0.0),
+                    fade_out=float(c.get("fade_out") or 0.0),
+                ))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("El archivo de proyecto contiene un clip dañado.") from exc
+        try:
+            tracks.append(Track(
+                name=str(t["name"]),
+                kind=t["kind"],
+                enabled=bool(t.get("enabled", True)),
+                muted=bool(t.get("muted", False)),
+                clips=clips,
             ))
-        tracks.append(Track(
-            name=t["name"],
-            kind=t["kind"],
-            enabled=bool(t.get("enabled", True)),
-            muted=bool(t.get("muted", False)),
-            clips=clips,
-        ))
-    raw_sel = int(data.get("selected_track_index") or 0)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("El archivo de proyecto contiene una pista dañada.") from exc
+    try:
+        raw_sel = int(data.get("selected_track_index") or 0)
+    except (TypeError, ValueError):
+        raw_sel = 0
     sel_idx = max(0, min(len(tracks) - 1, raw_sel)) if tracks else 0
     project = EditorProject(tracks=tracks, selected_track_index=sel_idx)
-    raw_heights = data.get("track_heights") or {}
-    heights = {str(k): clamp_track_height(v) for k, v in raw_heights.items()}
+    raw_heights = data.get("track_heights")
+    if isinstance(raw_heights, dict):
+        heights = {}
+        for k, v in raw_heights.items():
+            try:
+                heights[str(k)] = clamp_track_height(v)
+            except (TypeError, ValueError):
+                continue
+    else:
+        heights = {}
     return project, heights, media_list
 
 
@@ -949,8 +1000,21 @@ def save_project(
     media_library: Optional[list[MediaInfo]] = None,
 ) -> str:
     payload = project_to_dict(project, track_heights, media_library=media_library)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    folder = os.path.dirname(os.path.abspath(path))
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    temporary = f"{path}.tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        except OSError:
+            pass
+        raise
     return path
 
 
