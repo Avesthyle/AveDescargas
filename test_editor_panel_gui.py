@@ -1252,6 +1252,61 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_short_clip_right_handle_wheel_zero_delta_link_uniqueness_and_track_selection(self):
+        root = tk.Tk()
+        root.geometry("1200x800+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            v_media = MediaInfo(path="v.mp4", duration=10.0, has_video=True, has_audio=True, width=640, height=360, fps=30.0)
+            a_media = audio_media_from_video(v_media)
+
+            # 1. En un clip corto (14px), pulsar cerca del borde derecho selecciona resize_side == "right"
+            short = Clip(v_media, source_out=0.2, timeline_start=0.0)
+            panel.project.tracks[0].clips = [short]
+            panel.redraw_timeline()
+            root.update()
+            x1 = panel._x_at_time(0.0)
+            y_row0 = panel._layout()[0][0] + 15
+            panel.timeline.event_generate("<ButtonPress-1>", x=int(x1 + 10), y=int(y_row0))
+            root.update()
+            self.assertEqual(panel.resize_side, "right")
+            panel.drag_clip = None
+            panel.resize_side = None
+
+            # 2. _timeline_wheel con delta == 0 no cambia el zoom ni la posición de scroll
+            zoom_before = panel.zoom
+            fake_evt = type("E", (), {"delta": 0, "state": 0x0008, "x": 200, "y": 40})()
+            self.assertEqual(panel._timeline_wheel(fake_evt), "break")
+            self.assertEqual(panel.zoom, zoom_before)
+
+            # 3. _new_link_group evita colisiones con link-1 o link-{id(clip)}
+            v2 = Clip(v_media, source_out=4.0, timeline_start=2.0, use_source_audio=True)
+            other = Clip(a_media, source_out=1.0, timeline_start=8.0, link_group="link-" + str(id(v2)))
+            extra = Clip(a_media, source_out=1.0, timeline_start=9.0, link_group="link-1")
+            panel.project.tracks[0].clips = [v2]
+            panel.project.tracks[1].clips = [other, extra]
+            panel.selected_clip = v2
+            panel.toggle_linked_media()
+            self.assertIsNotNone(v2.link_group)
+            self.assertNotIn(v2.link_group, {other.link_group, extra.link_group})
+
+            # 4. _shift_linked_clip creando pista auxiliar no roba selected_track_index
+            panel.project.selected_track_index = 0
+            blocker = Clip(a_media, source_out=2.0, timeline_start=5.0)
+            linked = Clip(a_media, source_out=2.0, timeline_start=0.0, link_group="g-shift")
+            panel.project.tracks[1].clips = [blocker, linked]
+            panel._shift_linked_clip(linked, 5.5)
+            self.assertEqual(panel.project.selected_track_index, 0)
+            self.assertGreaterEqual(len(panel.project.tracks), 3)
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -407,13 +407,14 @@ class SimpleEditorPanel(tk.Frame):
         self.undo_stack.clear()
         self._update_undo_buttons()
 
-    def add_track(self, kind, record_undo=True):
+    def add_track(self, kind, record_undo=True, select=True):
         if record_undo:
             self._push_undo()
         name = unique_track_name([track.name for track in self.project.tracks], kind)
         track = Track(name, kind)
         self.project.tracks.append(track)
-        self.project.selected_track_index = len(self.project.tracks) - 1
+        if select:
+            self.project.selected_track_index = len(self.project.tracks) - 1
         self._refresh_tracks()
         self.redraw_timeline()
         return track
@@ -545,7 +546,9 @@ class SimpleEditorPanel(tk.Frame):
         self.timeline.xview_moveto(0)
 
     def _timeline_wheel(self, event, delta=None):
-        delta = delta if delta is not None else event.delta
+        delta = delta if delta is not None else getattr(event, "delta", 0)
+        if not delta:
+            return "break"
         step = 1 if delta > 0 else -1
         ctrl = bool(event.state & 0x0004)
         shift = bool(event.state & 0x0001)
@@ -638,7 +641,7 @@ class SimpleEditorPanel(tk.Frame):
             None,
         )
         if not alt_track:
-            alt_track = self.add_track(current_track.kind, record_undo=False)
+            alt_track = self.add_track(current_track.kind, record_undo=False, select=False)
         current_track.clips.remove(linked)
         alt_track.clips.append(linked)
         linked.timeline_start = wanted
@@ -903,6 +906,13 @@ class SimpleEditorPanel(tk.Frame):
             self.temporary_razor = False
             self.set_tool(self.previous_tool_mode)
 
+    def _new_link_group(self):
+        existing = {c.link_group for t in self.project.tracks for c in t.clips if c.link_group}
+        idx = 1
+        while f"link-{idx}" in existing:
+            idx += 1
+        return f"link-{idx}"
+
     def toggle_linked_media(self):
         self._commit_inspector_edits()
         clip = self.selected_clip
@@ -938,7 +948,7 @@ class SimpleEditorPanel(tk.Frame):
                         and abs(other.source_in - clip.source_in) < 0.02
                         and abs(other.duration - clip.duration) < 0.02
                     ):
-                        link_id = "link-" + str(id(clip))
+                        link_id = self._new_link_group()
                         clip.link_group = link_id
                         other.link_group = link_id
                         self._update_inspector()
@@ -952,9 +962,9 @@ class SimpleEditorPanel(tk.Frame):
             )
         audio_track = next((item for item in self.project.tracks if item.kind == "audio" and not _has_overlap(item)), None)
         if not audio_track:
-            audio_track = self.add_track("audio", record_undo=False)
+            audio_track = self.add_track("audio", record_undo=False, select=False)
         audio_media = audio_media_from_video(clip.media)
-        link_id = "link-" + str(id(clip))
+        link_id = self._new_link_group()
         audio_clip = Clip(
             audio_media, clip.source_in, clip.source_out, clip.timeline_start,
             name=f"Audio · {clip.name}", link_group=link_id,
@@ -2257,10 +2267,10 @@ class SimpleEditorPanel(tk.Frame):
         self.resize_side = None
         x1 = self._x_at_time(clip.timeline_start)
         x2 = x1 + max(14, clip.duration * self.zoom)
-        if abs(x - x1) <= 8:
-            self.resize_side = "left"
-        elif abs(x - x2) <= 8:
-            self.resize_side = "right"
+        d_left = abs(x - x1)
+        d_right = abs(x - x2)
+        if d_left <= 8 or d_right <= 8:
+            self.resize_side = "right" if d_right < d_left else "left"
         self.drag_clip = clip
         self.drag_track = track
         self.drag_offset = x - x1
