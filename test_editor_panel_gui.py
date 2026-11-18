@@ -1377,6 +1377,77 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_fallback_editor_panel_fixes(self):
+        from editor_panel import EditorPanel
+
+        root = tk.Tk()
+        root.geometry("1100x700+0+0")
+        panel = EditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            # 1. Eliminar todas las pistas mantiene selected_track_index >= 0
+            while panel.project.tracks:
+                panel.delete_track()
+            self.assertEqual(panel.project.selected_track_index, 0)
+
+            # 2. split_clip conserva tono/volumen, recorta fades y no repite sufijos "A A"
+            track = panel.add_track("video", "Vídeo 1")
+            media = MediaInfo(path="demo.mp4", duration=10.0, has_video=True, has_audio=True, width=640, height=360, fps=30.0)
+            clip = Clip(
+                media, source_in=0.0, source_out=6.0, timeline_start=0.0,
+                pitch_semitones=-3, volume=1.4, fade_in=5.0, fade_out=5.0,
+            )
+            track.clips.append(clip)
+            panel.selected_clip = clip
+            panel.refresh()
+            with mock.patch("editor_panel.simpledialog.askstring", return_value="2.0"):
+                panel.split_clip()
+            self.assertEqual(len(track.clips), 2)
+            left, right = track.clips
+            self.assertEqual(left.pitch_semitones, -3)
+            self.assertEqual(right.pitch_semitones, -3)
+            self.assertAlmostEqual(left.volume, 1.4)
+            self.assertAlmostEqual(right.volume, 1.4)
+            self.assertAlmostEqual(left.fade_in, 2.0)
+            self.assertAlmostEqual(right.fade_out, 4.0)
+            self.assertEqual(left.name, "demo · 1")
+
+            # Volver a dividir el primer tramo no acumula "A A"
+            panel.selected_clip = left
+            with mock.patch("editor_panel.simpledialog.askstring", return_value="1.0"):
+                panel.split_clip()
+            self.assertEqual(track.clips[0].name, "demo · 1")
+            self.assertEqual(track.clips[1].name, "demo · 2")
+
+            # 3. Hacer clic sobre la etiqueta de texto del clip lo selecciona en el timeline
+            panel.selected_clip = None
+            panel.redraw_timeline()
+            root.update()
+            text_items = [
+                item_id for item_id in panel.timeline.find_withtag("clip_text")
+                if panel.timeline_items.get(item_id, (None, None))[1] is track.clips[0]
+            ]
+            self.assertTrue(text_items)
+            tx1, ty1, _tx2, ty2 = panel.timeline.bbox(text_items[0])
+            panel.timeline.event_generate("<ButtonPress-1>", x=int(tx1 + 4), y=int((ty1 + ty2) / 2))
+            root.update()
+            self.assertIs(panel.selected_clip, track.clips[0])
+            panel.drag_clip = None
+
+            # 4. _start_export bloquea exportaciones concurrentes y destroy cancela el timer
+            panel.exporting = True
+            panel._start_export("/tmp/out.mp4", preview=False)
+            self.assertIn("en curso", panel.status.cget("text"))
+            self.assertIsNotNone(panel._poll_after_id)
+        finally:
+            panel.destroy()
+            self.assertIsNone(panel._poll_after_id)
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
