@@ -490,6 +490,27 @@ class ExportPlanTests(unittest.TestCase):
         self.assertEqual(len(segment), 8)
         self.assertEqual(segment[-1], 0.3)
 
+    def test_clip_minimum_duration_zero_fade_omission_and_bool_json_fields(self):
+        from media_editor import project_from_dict
+
+        with self.assertRaises(ValueError):
+            Clip(video_info("tiny.mp4"), source_in=0.0, source_out=0.0004)
+        with self.assertRaises(ValueError):
+            Clip(video_info("bool.mp4"), source_out=2.0, pitch_semitones=True)
+
+        clip = Clip(video_info("v.mp4"), source_out=3.0, fade_in=0.0004, fade_out=0.0004)
+        plan = build_export_plan(EditorProject([Track("V1", "video", clips=[clip])]), "active", None, "salida.mp4")
+        self.assertNotIn("fade=t=", plan["filter_complex"])
+        self.assertNotIn("afade=t=", plan["filter_complex"])
+
+        with self.assertRaises(ValueError):
+            project_from_dict({"media": [{"path": "a.mp4", "duration": 5.0, "has_video": True, "has_audio": False, "width": True}], "tracks": []})
+        with self.assertRaises(ValueError):
+            project_from_dict({
+                "media": [{"path": "a.mp4", "duration": 5.0, "has_video": True, "has_audio": False}],
+                "tracks": [{"name": "V1", "kind": "video", "clips": [{"media_idx": 0, "source_in": 0, "source_out": 2, "timeline_start": 0, "pitch_semitones": True}]}],
+            })
+
 
 if __name__ == "__main__":
     unittest.main()

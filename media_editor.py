@@ -331,7 +331,12 @@ class Clip:
         self.source_in = parse_editor_time(self.source_in)
         self.source_out = self.media.duration if self.source_out is None else parse_editor_time(self.source_out)
         self.timeline_start = parse_editor_time(self.timeline_start)
-        self.pitch_semitones = int(self.pitch_semitones)
+        if isinstance(self.pitch_semitones, bool):
+            raise ValueError("El tono debe estar entre -12 y +12 semitonos.")
+        try:
+            self.pitch_semitones = int(self.pitch_semitones)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("El tono debe estar entre -12 y +12 semitonos.") from exc
         vol = float(self.volume)
         f_in = float(self.fade_in)
         f_out = float(self.fade_out)
@@ -343,6 +348,8 @@ class Clip:
         pitch_factor(self.pitch_semitones)
         if self.source_out <= self.source_in:
             raise ValueError("La salida debe ser posterior a la entrada.")
+        if self.source_out - self.source_in < MIN_CLIP_DURATION - 1e-9:
+            raise ValueError(f"La duración mínima del clip es {MIN_CLIP_DURATION:.2f} s.")
         if self.source_out > self.media.duration + 0.05:
             raise ValueError("La salida supera la duración del archivo.")
         if not self.name:
@@ -649,10 +656,10 @@ def build_export_plan(
     if not clips_with_tracks:
         raise ValueError("No hay clips activos para exportar.")
     duration = project.duration(tracks)
-    if duration <= 0:
+    if duration < MIN_CLIP_DURATION - 1e-9:
         raise ValueError("La línea de tiempo está vacía.")
 
-    video_tracks = [track for track in tracks if track.kind == "video" and track.clips]
+    video_tracks = [track for track in tracks if track.kind == "video" and any(c.media.has_video for c in track.clips)]
     video_clips = [clip for track in video_tracks for clip in track.clips if clip.media.has_video]
     first_video = video_clips[0] if video_clips else None
     target_res = EXPORT_RESOLUTIONS.get(resolution)
@@ -691,13 +698,13 @@ def build_export_plan(
         for track in reversed(video_tracks):
             is_upper_overlay = track is not video_tracks[-1]
             for clip in sorted(track.clips, key=lambda item: item.timeline_start):
-                if not clip.media.has_video:
+                if not clip.media.has_video or clip.duration < MIN_CLIP_DURATION - 1e-9:
                     continue
                 index = input_map[id(clip)]
                 prepared = f"vclip{layer_number}"
                 output = f"vlayer{layer_number}"
                 d_in, d_out = clamp_fades(clip.fade_in, clip.fade_out, clip.duration)
-                alpha_fade = is_upper_overlay and (d_in > 0 or d_out > 0)
+                alpha_fade = is_upper_overlay and (d_in >= 0.001 or d_out >= 0.001)
                 v_filters = [
                     f"[{index}:v]trim=start={_number(clip.source_in)}:end={_number(clip.source_out)}",
                     "setpts=PTS-STARTPTS",
@@ -705,10 +712,10 @@ def build_export_plan(
                 ]
                 if is_upper_overlay:
                     v_filters.append("format=yuva420p")
-                if d_in > 0:
+                if d_in >= 0.001:
                     suffix = ":alpha=1" if alpha_fade else ""
                     v_filters.append(f"fade=t=in:st=0:d={_number(d_in)}{suffix}")
-                if d_out > 0:
+                if d_out >= 0.001:
                     st_out = max(0.0, clip.duration - d_out)
                     suffix = ":alpha=1" if alpha_fade else ""
                     v_filters.append(f"fade=t=out:st={_number(st_out)}:d={_number(d_out)}{suffix}")
@@ -734,6 +741,7 @@ def build_export_plan(
             clip.media.has_audio
             and not track.muted
             and clip.use_source_audio
+            and clip.duration >= MIN_CLIP_DURATION - 1e-9
         )
         if not include:
             continue
@@ -751,9 +759,9 @@ def build_export_plan(
         if abs(clip.volume - 1.0) > 1e-4:
             a_parts.append(f"volume={_number(clip.volume)}")
         d_in, d_out = clamp_fades(clip.fade_in, clip.fade_out, clip.duration)
-        if d_in > 0:
+        if d_in >= 0.001:
             a_parts.append(f"afade=t=in:st=0:d={_number(d_in)}")
-        if d_out > 0:
+        if d_out >= 0.001:
             st_out = max(0.0, clip.duration - d_out)
             a_parts.append(f"afade=t=out:st={_number(st_out)}:d={_number(d_out)}")
         a_parts.extend([
@@ -959,14 +967,18 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
             fps_val = float(m.get("fps") or 0.0)
             if not math.isfinite(fps_val) or fps_val < 0:
                 fps_val = 0.0
+            width_raw = m.get("width") or 0
+            height_raw = m.get("height") or 0
+            if isinstance(width_raw, bool) or isinstance(height_raw, bool):
+                raise ValueError("Dimensiones inválidas")
             media_list.append(
                 MediaInfo(
                     path=str(m["path"]),
                     duration=dur,
                     has_video=bool(m["has_video"]),
                     has_audio=bool(m["has_audio"]),
-                    width=max(0, int(m.get("width") or 0)),
-                    height=max(0, int(m.get("height") or 0)),
+                    width=max(0, int(width_raw)),
+                    height=max(0, int(height_raw)),
                     fps=fps_val,
                     format_name=str(m.get("format_name") or ""),
                     video_codec=m.get("video_codec"),
@@ -1004,6 +1016,9 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
                 f_out = float(c.get("fade_out") or 0.0)
                 if not (math.isfinite(vol) and math.isfinite(f_in) and math.isfinite(f_out)):
                     raise ValueError("Valor flotante no finito")
+                raw_pitch = c.get("pitch_semitones") or 0
+                if isinstance(raw_pitch, bool):
+                    raise ValueError("Tono booleano")
                 clips.append(Clip(
                     media=clip_media,
                     source_in=c["source_in"],
@@ -1011,7 +1026,7 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
                     timeline_start=c["timeline_start"],
                     use_source_audio=bool(c.get("use_source_audio", True)),
                     name=str(c.get("name") or ""),
-                    pitch_semitones=int(c.get("pitch_semitones") or 0),
+                    pitch_semitones=int(raw_pitch),
                     link_group=c.get("link_group"),
                     volume=vol,
                     fade_in=f_in,
@@ -1030,7 +1045,8 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("El archivo de proyecto contiene una pista dañada.") from exc
     try:
-        raw_sel = int(data.get("selected_track_index") or 0)
+        raw_sel_val = data.get("selected_track_index") or 0
+        raw_sel = 0 if isinstance(raw_sel_val, bool) else int(raw_sel_val)
     except (TypeError, ValueError, OverflowError):
         raw_sel = 0
     sel_idx = max(0, min(len(tracks) - 1, raw_sel)) if tracks else 0
