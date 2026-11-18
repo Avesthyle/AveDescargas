@@ -1179,6 +1179,79 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_empty_click_clears_preview_duplicate_commits_spinbox_and_vproc_cleans_on_ffplay_error(self):
+        root = tk.Tk()
+        root.geometry("1200x800+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            v_media = MediaInfo(path="v.mp4", duration=10.0, has_video=True, has_audio=True, width=640, height=360, fps=30.0)
+            v_clip = Clip(v_media, source_out=3.0, timeline_start=0.0)
+            panel.project.tracks[0].clips = [v_clip]
+            panel.selected_clip = v_clip
+            panel.selected_media = v_media
+            panel.preview_photo = object()
+            panel._update_inspector()
+            panel.redraw_timeline()
+            root.update()
+
+            # Clic en un hueco vacío (t = 8.0s) limpia el fotograma anterior del visor
+            x_gap = panel._x_at_time(8.0)
+            y_first = panel._layout()[0][0] + 15
+            panel.timeline.event_generate("<ButtonPress-1>", x=int(x_gap), y=int(y_first))
+            root.update()
+            self.assertIsNone(panel.preview_photo)
+
+            # Editar volume_spin y duplicar directamente confirma el volumen antes de clonar
+            panel.selected_clip = v_clip
+            panel.selected_media = v_media
+            panel._update_inspector()
+            root.update()
+            panel.volume_spin.focus_force()
+            root.update()
+            panel.volume_spin.delete(0, "end")
+            panel.volume_spin.insert(0, "140")
+            panel.duplicate_clip()
+            self.assertEqual(len(panel.project.tracks[0].clips), 2)
+            self.assertAlmostEqual(panel.project.tracks[0].clips[0].volume, 1.4, places=2)
+            self.assertAlmostEqual(panel.project.tracks[0].clips[1].volume, 1.4, places=2)
+
+            # Si ffplay falla tras lanzar ffmpeg en toggle_play, v_proc se termina en finally
+            with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_vid:
+                vid = MediaInfo(path=tmp_vid.name, duration=4.0, has_video=True, has_audio=True)
+                panel.selected_clip = None
+                panel.selected_media = vid
+                panel.mark_in, panel.mark_out = 0.0, 4.0
+                panel.cursor_time = 0.0
+                fake_vproc = mock.MagicMock()
+                fake_vproc.poll.return_value = None
+                fake_vproc.stdout = mock.MagicMock()
+                fake_vproc.stderr = mock.MagicMock()
+                calls = {"n": 0}
+
+                def popen_side_effect(*_args, **_kwargs):
+                    calls["n"] += 1
+                    if calls["n"] == 1:
+                        return fake_vproc
+                    raise OSError("missing ffplay")
+
+                with mock.patch("simple_editor_panel.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+                     mock.patch("simple_editor_panel.subprocess.Popen", side_effect=popen_side_effect):
+                    panel.toggle_play()
+                    import time
+                    deadline = time.monotonic() + 2.0
+                    while not fake_vproc.terminate.called and time.monotonic() < deadline:
+                        root.update()
+                        time.sleep(0.01)
+                self.assertTrue(fake_vproc.terminate.called)
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

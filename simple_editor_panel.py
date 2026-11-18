@@ -457,6 +457,9 @@ class SimpleEditorPanel(tk.Frame):
         self.track_heights = heights
         self.selected_clip = None
         self.drag_clip = None
+        self.resize_track_index = None
+        self.snap_target = None
+        self.snap_label = ""
         total = self.project.duration()
         if self.playhead_timeline > total:
             self.playhead_timeline = total
@@ -466,6 +469,7 @@ class SimpleEditorPanel(tk.Frame):
         self.redraw_timeline()
 
     def undo(self):
+        self._commit_inspector_edits()
         if self.playing:
             self.stop_playback()
         if not self.undo_stack:
@@ -477,6 +481,7 @@ class SimpleEditorPanel(tk.Frame):
         self.status.configure(text="Deshecho (Ctrl+Z). Rehacer con Ctrl+Y.", fg=YELLOW)
 
     def redo(self):
+        self._commit_inspector_edits()
         if self.playing:
             self.stop_playback()
         if not self.redo_stack:
@@ -755,6 +760,7 @@ class SimpleEditorPanel(tk.Frame):
             for clip in moved:
                 for linked in self._linked_clips(clip):
                     self._shift_linked_clip(linked, linked.timeline_start - shift)
+        self._refresh_preview_at_playhead()
         self.redraw_timeline()
         self.status.configure(text=f"Hueco de {format_editor_time(shift)} cerrado en {track.name}.", fg=GREEN)
 
@@ -898,6 +904,7 @@ class SimpleEditorPanel(tk.Frame):
             self.set_tool(self.previous_tool_mode)
 
     def toggle_linked_media(self):
+        self._commit_inspector_edits()
         clip = self.selected_clip
         if not clip:
             return
@@ -994,6 +1001,7 @@ class SimpleEditorPanel(tk.Frame):
         self.status.configure(text=f"Volumen: {int(round(vol * 100))}% · Fundidos: {fade_in:.2f}s / {fade_out:.2f}s", fg=GREEN)
 
     def _pitch_changed(self, _event=None):
+        self._commit_inspector_edits()
         if not self.selected_clip:
             return
         label = self.pitch_var.get().split("·", 1)[0].strip()
@@ -1053,6 +1061,7 @@ class SimpleEditorPanel(tk.Frame):
         return cloned
 
     def copy_clip(self):
+        self._commit_inspector_edits()
         if not self.selected_clip:
             self.status.configure(text="Selecciona un clip para copiar (Ctrl+C).", fg=YELLOW)
             return
@@ -1060,6 +1069,8 @@ class SimpleEditorPanel(tk.Frame):
         self.status.configure(text=f"Copiado: {self.clipboard_clip.name}", fg=GREEN)
 
     def paste_clip(self, at_time=None, target_track=None):
+        if self.playing:
+            self.stop_playback()
         if not self.clipboard_clip:
             self.status.configure(text="No hay ningún clip copiado.", fg=YELLOW)
             return
@@ -1093,6 +1104,7 @@ class SimpleEditorPanel(tk.Frame):
         self.status.configure(text=f"Pegado: {pasted.name}", fg=GREEN)
 
     def duplicate_clip(self):
+        self._commit_inspector_edits()
         if not self.selected_clip:
             self.status.configure(text="Selecciona un clip para duplicarlo (Ctrl+D).", fg=YELLOW)
             return
@@ -1145,6 +1157,9 @@ class SimpleEditorPanel(tk.Frame):
         self.drag_clip = None
         self.drag_track = None
         self.resize_side = None
+        self.resize_track_index = None
+        self.snap_target = None
+        self.snap_label = ""
         self._pending_snapshot = None
         self.waveform_cache.clear()
         self.waveform_pending.clear()
@@ -1186,10 +1201,13 @@ class SimpleEditorPanel(tk.Frame):
             self.status.configure(text=f"Proyecto cargado: {pathlib.Path(path).name}", fg=GREEN)
 
     def toggle_track(self):
+        if self.playing:
+            self.stop_playback()
         track = self.project.selected_track()
         if track:
             self._push_undo()
             track.enabled = not track.enabled
+            self._refresh_preview_at_playhead()
             self._refresh_tracks()
             self.redraw_timeline()
 
@@ -1202,6 +1220,8 @@ class SimpleEditorPanel(tk.Frame):
             self.redraw_timeline()
 
     def delete_track(self):
+        if self.playing:
+            self.stop_playback()
         index = self.project.selected_track_index
         if 0 <= index < len(self.project.tracks):
             self._push_undo()
@@ -1829,6 +1849,11 @@ class SimpleEditorPanel(tk.Frame):
                     ui_q.put(("play_error", str(exc)))
                 p = None
             finally:
+                if v_proc is not None and v_proc.poll() is None:
+                    try:
+                        v_proc.terminate()
+                    except Exception:
+                        pass
                 for stream in (getattr(v_proc, "stdout", None), getattr(v_proc, "stderr", None)):
                     if stream:
                         try:
@@ -1922,6 +1947,8 @@ class SimpleEditorPanel(tk.Frame):
         self.cursor_time = max(clip.source_in, min(self.cursor_time, clip.source_out))
 
     def cut_selected_clip(self):
+        if self.playing:
+            self.stop_playback()
         clip = self.selected_clip
         if not clip or not self.selected_media or clip.media is not self.selected_media:
             self.status.configure(text="Selecciona un clip de la línea de tiempo y coloca el cursor donde quieras cortar.", fg=YELLOW)
@@ -2198,8 +2225,12 @@ class SimpleEditorPanel(tk.Frame):
                 self.cursor_time = timeline_to_source_time(active_clip, self.playhead_timeline)
                 if active_clip.media.has_video:
                     self.request_frame(self.cursor_time)
+                else:
+                    self.preview_photo = None
+                    self.preview.configure(image="", text=f"♫  {pathlib.Path(active_clip.media.path).name}")
             else:
                 self.selected_clip = None
+                self._refresh_preview_at_playhead()
             self._update_inspector()
             self.redraw_timeline()
             return
@@ -2427,6 +2458,7 @@ class SimpleEditorPanel(tk.Frame):
             self.redraw_timeline()
 
     def toggle_clip_audio(self):
+        self._commit_inspector_edits()
         clip = self.selected_clip
         if not clip or not clip.media.has_audio:
             return
