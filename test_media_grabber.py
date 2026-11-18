@@ -694,6 +694,46 @@ class PlaylistHandlingTests(unittest.TestCase):
             media_grabber.IS_DOWNLOADING = prev_downloading
             media_grabber.CANCEL_REQUESTED = prev_cancel
 
+    def test_truncation_hostname_matching_and_resilient_check_queue(self):
+        import types
+        import media_grabber
+
+        # 1. sanitize_output_name quita puntos y espacios tras truncar a 150 caracteres
+        long_name = ("a" * 148) + ". ..extra"
+        sanitized = sanitize_output_name(long_name)
+        self.assertEqual(sanitized, "a" * 148)
+
+        # 2. detect_platform valida el host real y no subcadenas en query/ruta
+        self.assertEqual(detect_platform("https://example.com/?next=https://youtube.com/watch?v=1"), "general")
+        self.assertEqual(detect_platform("https://evil-youtube.com/watch?v=1"), "general")
+        self.assertEqual(detect_platform("https://m.youtube.com/watch?v=1"), "youtube")
+        self.assertEqual(detect_platform("https://youtu.be/abc123"), "youtube")
+
+        # 3. check_queue sobrevive campos None y reagenda el temporizador aunque un mensaje falle
+        while not media_grabber.ui_queue.empty():
+            media_grabber.ui_queue.get_nowait()
+        media_grabber.ui_queue.put({"type": "active_url", "index": None, "url": None, "platform": None})
+        media_grabber.ui_queue.put({"type": "log", "text": "boom", "level": "normal"})
+
+        scheduled = []
+        dummy_app = types.SimpleNamespace(
+            _queue_after_id=None,
+            progress_bar={"value": 0},
+            lbl_status=types.SimpleNamespace(configure=lambda **_kw: None),
+            btn_download=types.SimpleNamespace(configure=lambda **_kw: None),
+            btn_cancel=types.SimpleNamespace(configure=lambda **_kw: None),
+            log_to_terminal=lambda text, *_a: (_ for _ in ()).throw(RuntimeError("ui")) if text == "boom" else None,
+            root=types.SimpleNamespace(
+                winfo_exists=lambda: True,
+                after=lambda ms, fn: scheduled.append((ms, fn)) or "after-1",
+            ),
+        )
+        dummy_app.check_queue = lambda: media_grabber.MediaGrabberApp.check_queue(dummy_app)
+        with self.assertRaises(RuntimeError):
+            media_grabber.MediaGrabberApp.check_queue(dummy_app)
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(dummy_app._queue_after_id, "after-1")
+
 
 if __name__ == "__main__":
     unittest.main()

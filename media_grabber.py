@@ -102,11 +102,11 @@ def preferred_download_folder(settings: dict, default: str) -> str:
 
 
 def sanitize_output_name(value: str) -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", (value or "")).strip().rstrip(". ")
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", (value or "")).strip()[:150].rstrip(". ")
     reserved = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
     if not cleaned or cleaned.upper() in reserved:
         return ""
-    return cleaned[:150]
+    return cleaned
 
 
 def is_youtube_auth_challenge(error) -> bool:
@@ -313,14 +313,25 @@ def is_valid_http_url(url: str) -> bool:
 
 
 def detect_platform(url: str) -> str:
-    url = url.strip().lower()
-    if "open.spotify.com" in url or "spotify.link" in url:
+    raw = (url or "").strip()
+    if not raw:
+        return "general"
+    try:
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return "general"
+
+    def matches(*domains):
+        return any(host == dom or host.endswith(f".{dom}") for dom in domains)
+
+    if matches("open.spotify.com", "spotify.link"):
         return "spotify"
-    if "youtube.com" in url or "youtu.be" in url:
+    if matches("youtube.com", "youtu.be", "youtube-nocookie.com"):
         return "youtube"
-    if "instagram.com" in url or "instagr.am" in url:
+    if matches("instagram.com", "instagr.am"):
         return "instagram"
-    if "facebook.com" in url or "fb.watch" in url or "fb.com" in url:
+    if matches("facebook.com", "fb.watch", "fb.com"):
         return "facebook"
     return "general"
 
@@ -786,9 +797,13 @@ def ask_playlist_action(parent):
 
     dialog.protocol("WM_DELETE_WINDOW", lambda: choose(None))
     dialog.update_idletasks()
-    x = parent.winfo_rootx() + (parent.winfo_width() - dialog.winfo_reqwidth()) // 2
-    y = parent.winfo_rooty() + (parent.winfo_height() - dialog.winfo_reqheight()) // 2
-    dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+    screen_w = dialog.winfo_screenwidth()
+    screen_h = dialog.winfo_screenheight()
+    req_w = dialog.winfo_reqwidth()
+    req_h = dialog.winfo_reqheight()
+    x = max(0, min(screen_w - req_w, parent.winfo_rootx() + (parent.winfo_width() - req_w) // 2))
+    y = max(0, min(screen_h - req_h, parent.winfo_rooty() + (parent.winfo_height() - req_h) // 2))
+    dialog.geometry(f"+{x}+{y}")
     dialog.grab_set()
     parent.wait_window(dialog)
     return result["value"]
@@ -798,8 +813,14 @@ def select_playlist_entries(parent, url):
     """Carga una playlist y permite elegir entradas mediante casillas."""
     dialog = tk.Toplevel(parent)
     dialog.title("Seleccionar canciones de la playlist")
-    dialog.geometry("650x520")
-    dialog.minsize(520, 380)
+    screen_w = dialog.winfo_screenwidth()
+    screen_h = dialog.winfo_screenheight()
+    win_w = min(650, max(360, screen_w - 40))
+    win_h = min(520, max(300, screen_h - 60))
+    pos_x = max(0, min(screen_w - win_w, parent.winfo_rootx() + (parent.winfo_width() - win_w) // 2))
+    pos_y = max(0, min(screen_h - win_h, parent.winfo_rooty() + (parent.winfo_height() - win_h) // 2))
+    dialog.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+    dialog.minsize(min(520, win_w), min(380, win_h))
     dialog.configure(bg="#1a1a1a")
     dialog.transient(parent)
     dialog.columnconfigure(0, weight=1)
@@ -1616,97 +1637,97 @@ class MediaGrabberApp:
 
     # --- Thread Safe Queue Checker Loop ---
     def check_queue(self):
-        while not ui_queue.empty():
-            try:
-                msg = ui_queue.get_nowait()
-            except queue.Empty:
-                break
+        try:
+            while not ui_queue.empty():
+                try:
+                    msg = ui_queue.get_nowait()
+                except queue.Empty:
+                    break
 
-            m_type = msg.get('type')
-            
-            if m_type == 'start':
-                self.btn_download.configure(state='disabled')
-                self.btn_cancel.configure(state='normal')
-                self.progress_bar['value'] = 0
-                self.lbl_status.configure(text="Iniciando descargas...", fg="#ffffff")
+                m_type = msg.get('type')
 
-            elif m_type == 'detected_title':
-                if msg.get('url') == self.title_lookup_url:
-                    auto_val = getattr(self, "_auto_title_value", None)
-                    current = self.custom_name_var.get().strip()
-                    if current in ("", "Obteniendo título…") or (auto_val and current == auto_val):
-                        detected = msg.get('title') or ""
-                        self._auto_title_value = detected or None
-                        self.custom_name_var.set(detected)
+                if m_type == 'start':
+                    self.btn_download.configure(state='disabled')
+                    self.btn_cancel.configure(state='normal')
+                    self.progress_bar['value'] = 0
+                    self.lbl_status.configure(text="Iniciando descargas...", fg="#ffffff")
 
-            elif m_type == 'youtube_login_opened':
-                messagebox.showinfo(
-                    "Inicia sesión en YouTube",
-                    "AveDescargas ha abierto una ventana especial de Chrome.\n\n"
-                    "Inicia sesión en YouTube y después cierra completamente esa ventana. "
-                    "La descarga continuará automáticamente.",
-                )
-                
-            elif m_type == 'active_url':
-                idx = msg.get('index') + 1
-                url = msg.get('url')
-                platform = msg.get('platform').upper()
-                self.log_to_terminal(f"📥 [{idx}] Descargando ({platform}): {url}", "normal")
-                self.lbl_status.configure(text=f"Procesando enlace {idx}...", fg="#ffffff")
-                self.progress_bar['value'] = 0
-                
-            elif m_type == 'progress':
-                percent = msg.get('percent', 0.0)
-                percent_str = msg.get('percent_str', '')
-                speed = msg.get('speed', '')
-                eta = msg.get('eta', '')
-                
-                self.progress_bar['value'] = percent
-                self.lbl_status.configure(text=f"Descargando: {percent_str} | Velocidad: {speed} | Tiempo restante: {eta}", fg="#0078d4")
-                
-            elif m_type == 'finished_download':
-                fname = msg.get('filename')
-                self.log_to_terminal(f"  ✅ Descarga completa: {fname}", "success")
-                self.lbl_status.configure(text="Procesando/Convirtiendo archivo...", fg="#2EA043")
-                
-            elif m_type == 'log':
-                text = msg.get('text')
-                level = msg.get('level')
-                self.log_to_terminal(text, level)
-                
-            elif m_type == 'complete':
-                ok = msg.get('ok_count')
-                err = msg.get('err_count')
-                cancelled = msg.get('cancelled')
-                
-                self.progress_bar['value'] = 100 if (ok > 0 and not cancelled) else 0
-                
-                if cancelled:
-                    self.log_to_terminal("\n🛑 Descargas canceladas por el usuario.", "warning")
-                    self.lbl_status.configure(text="Operación cancelada.", fg="#F9C846")
-                    messagebox.showinfo("Cancelado", "Las descargas han sido canceladas por el usuario.")
-                else:
-                    self.log_to_terminal(f"\n✨ ¡Finalizado! Descargas completadas: {ok} | Errores: {err}", "success" if err == 0 else "warning")
-                    self.lbl_status.configure(text=f"¡Terminado! {ok} exitosas, {err} errores.", fg="#2EA043" if err == 0 else "#F9C846")
-                    messagebox.showinfo("Proceso Terminado", f"¡Descargas terminadas!\n\nExitosas: {ok}\nErrores: {err}")
-                    
-                self.btn_download.configure(state='normal')
-                self.btn_cancel.configure(state='disabled')
-                
-                # Run temporary files cleanup
-                folder = self.folder_var.get().strip()
-                if os.path.exists(folder):
-                    deleted = clean_folder(folder)
-                    if deleted > 0:
-                        self.log_to_terminal(f"🧹 Limpieza: Se eliminaron {deleted} archivos temporales.", "normal")
+                elif m_type == 'detected_title':
+                    if msg.get('url') == self.title_lookup_url:
+                        auto_val = getattr(self, "_auto_title_value", None)
+                        current = self.custom_name_var.get().strip()
+                        if current in ("", "Obteniendo título…") or (auto_val and current == auto_val):
+                            detected = msg.get('title') or ""
+                            self._auto_title_value = detected or None
+                            self.custom_name_var.set(detected)
 
-        # Repeat check every 100ms
-        winfo_exists = getattr(self.root, "winfo_exists", None)
-        if not callable(winfo_exists) or winfo_exists():
-            try:
-                self._queue_after_id = self.root.after(100, self.check_queue)
-            except tk.TclError:
-                pass
+                elif m_type == 'youtube_login_opened':
+                    messagebox.showinfo(
+                        "Inicia sesión en YouTube",
+                        "AveDescargas ha abierto una ventana especial de Chrome.\n\n"
+                        "Inicia sesión en YouTube y después cierra completamente esa ventana. "
+                        "La descarga continuará automáticamente.",
+                    )
+
+                elif m_type == 'active_url':
+                    idx = (msg.get('index') or 0) + 1
+                    url = msg.get('url') or ''
+                    platform = (msg.get('platform') or 'general').upper()
+                    self.log_to_terminal(f"📥 [{idx}] Descargando ({platform}): {url}", "normal")
+                    self.lbl_status.configure(text=f"Procesando enlace {idx}...", fg="#ffffff")
+                    self.progress_bar['value'] = 0
+
+                elif m_type == 'progress':
+                    percent = msg.get('percent', 0.0)
+                    percent_str = msg.get('percent_str', '')
+                    speed = msg.get('speed', '')
+                    eta = msg.get('eta', '')
+
+                    self.progress_bar['value'] = percent
+                    self.lbl_status.configure(text=f"Descargando: {percent_str} | Velocidad: {speed} | Tiempo restante: {eta}", fg="#0078d4")
+
+                elif m_type == 'finished_download':
+                    fname = msg.get('filename') or ''
+                    self.log_to_terminal(f"  ✅ Descarga completa: {fname}", "success")
+                    self.lbl_status.configure(text="Procesando/Convirtiendo archivo...", fg="#2EA043")
+
+                elif m_type == 'log':
+                    text = msg.get('text') or ''
+                    level = msg.get('level') or 'normal'
+                    self.log_to_terminal(text, level)
+
+                elif m_type == 'complete':
+                    ok = msg.get('ok_count') or 0
+                    err = msg.get('err_count') or 0
+                    cancelled = bool(msg.get('cancelled'))
+
+                    self.progress_bar['value'] = 100 if (ok > 0 and not cancelled) else 0
+
+                    if cancelled:
+                        self.log_to_terminal("\n🛑 Descargas canceladas por el usuario.", "warning")
+                        self.lbl_status.configure(text="Operación cancelada.", fg="#F9C846")
+                        messagebox.showinfo("Cancelado", "Las descargas han sido canceladas por el usuario.")
+                    else:
+                        self.log_to_terminal(f"\n✨ ¡Finalizado! Descargas completadas: {ok} | Errores: {err}", "success" if err == 0 else "warning")
+                        self.lbl_status.configure(text=f"¡Terminado! {ok} exitosas, {err} errores.", fg="#2EA043" if err == 0 else "#F9C846")
+                        messagebox.showinfo("Proceso Terminado", f"¡Descargas terminadas!\n\nExitosas: {ok}\nErrores: {err}")
+
+                    self.btn_download.configure(state='normal')
+                    self.btn_cancel.configure(state='disabled')
+
+                    # Run temporary files cleanup
+                    folder = self.folder_var.get().strip()
+                    if os.path.exists(folder):
+                        deleted = clean_folder(folder)
+                        if deleted > 0:
+                            self.log_to_terminal(f"🧹 Limpieza: Se eliminaron {deleted} archivos temporales.", "normal")
+        finally:
+            winfo_exists = getattr(self.root, "winfo_exists", None)
+            if not callable(winfo_exists) or winfo_exists():
+                try:
+                    self._queue_after_id = self.root.after(100, self.check_queue)
+                except tk.TclError:
+                    pass
 
 
 if __name__ == "__main__":
