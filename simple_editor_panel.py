@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from io import BytesIO
+import math
 import os
 import pathlib
 import queue
@@ -996,10 +997,24 @@ class SimpleEditorPanel(tk.Frame):
         if not clip:
             return
         try:
-            vol = max(0.0, min(2.0, float(self.volume_var.get()) / 100.0))
-            fade_in, fade_out = clamp_fades(float(self.fade_in_var.get()), float(self.fade_out_var.get()), clip.duration)
+            raw_vol = float(self.volume_var.get())
+            raw_in = float(self.fade_in_var.get())
+            raw_out = float(self.fade_out_var.get())
         except (ValueError, TypeError, tk.TclError):
+            self.volume_var.set(int(round(clip.volume * 100)))
+            self.fade_in_var.set(round(clip.fade_in, 2))
+            self.fade_out_var.set(round(clip.fade_out, 2))
             return
+        if not (math.isfinite(raw_vol) and math.isfinite(raw_in) and math.isfinite(raw_out)):
+            self.volume_var.set(int(round(clip.volume * 100)))
+            self.fade_in_var.set(round(clip.fade_in, 2))
+            self.fade_out_var.set(round(clip.fade_out, 2))
+            return
+        vol = max(0.0, min(2.0, raw_vol / 100.0))
+        fade_in, fade_out = clamp_fades(raw_in, raw_out, clip.duration)
+        self.volume_var.set(int(round(vol * 100)))
+        self.fade_in_var.set(round(fade_in, 2))
+        self.fade_out_var.set(round(fade_out, 2))
         if abs(clip.volume - vol) < 1e-4 and abs(clip.fade_in - fade_in) < 1e-4 and abs(clip.fade_out - fade_out) < 1e-4:
             return
         self._push_undo()
@@ -1008,8 +1023,6 @@ class SimpleEditorPanel(tk.Frame):
             target.volume = vol
             target.fade_in = t_in
             target.fade_out = t_out
-        self.fade_in_var.set(round(fade_in, 2))
-        self.fade_out_var.set(round(fade_out, 2))
         self.redraw_timeline()
         self.status.configure(text=f"Volumen: {int(round(vol * 100))}% · Fundidos: {fade_in:.2f}s / {fade_out:.2f}s", fg=GREEN)
 
@@ -1149,6 +1162,9 @@ class SimpleEditorPanel(tk.Frame):
             messagebox.showerror("Error al guardar", str(exc))
 
     def load_project_dialog(self):
+        if self.exporting:
+            self.status.configure(text="No puedes abrir otro proyecto mientras hay una exportación en curso.", fg=YELLOW)
+            return
         path = filedialog.askopenfilename(
             title="Abrir proyecto",
             filetypes=[("Proyecto AveDescargas", "*.avep"), ("JSON", "*.json"), ("Todos", "*.*")],
@@ -1249,6 +1265,9 @@ class SimpleEditorPanel(tk.Frame):
             self.track_heights.pop(removed.name, None)
             self.project.selected_track_index = max(0, min(index, len(self.project.tracks) - 1))
             self.selected_clip = None
+            total = self.project.duration()
+            if self.playhead_timeline > total:
+                self.playhead_timeline = total
             self._refresh_preview_at_playhead()
             self._refresh_tracks()
             self._update_inspector()
@@ -1423,7 +1442,10 @@ class SimpleEditorPanel(tk.Frame):
         self.media_library.pop(index)
         self.media_list.delete(index)
         if self.selected_media is media:
+            if self.playing:
+                self.stop_playback()
             self.selected_media = None
+            self._refresh_preview_at_playhead()
         self.status.configure(text=f"Quitado de la lista: {pathlib.Path(media.path).name}", fg=TEXT)
 
     def _delete_shortcut(self):
@@ -1532,9 +1554,11 @@ class SimpleEditorPanel(tk.Frame):
             ffmpeg = discover_ffmpeg_tools()[0]
             subprocess.run(
                 [ffmpeg, "-y", "-v", "error", "-ss", f"{self.cursor_time:.3f}", "-i", media.path, "-frames:v", "1", path],
-                capture_output=True, text=True, check=True,
+                capture_output=True, text=True, check=True, timeout=15,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            if not os.path.isfile(path) or os.path.getsize(path) == 0:
+                raise RuntimeError("No se pudo extraer ningún fotograma en esa posición.")
             self.status.configure(text=f"Fotograma guardado: {pathlib.Path(path).name}", fg=GREEN)
         except Exception as exc:
             messagebox.showerror("Error al capturar", str(exc))
@@ -1619,7 +1643,13 @@ class SimpleEditorPanel(tk.Frame):
                     f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
                     "-f", "image2pipe", "-vcodec", "png", "pipe:1",
                 ]
-                result = subprocess.run(command, capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                try:
+                    result = subprocess.run(
+                        command, capture_output=True, timeout=15,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                except (subprocess.SubprocessError, OSError):
+                    return
                 if result.returncode == 0 and result.stdout:
                     q.put(("frame", tok, result.stdout))
 
@@ -1751,7 +1781,7 @@ class SimpleEditorPanel(tk.Frame):
         self.play_btn.configure(text="Ⅱ")
         self.frame_token += 1
         token = self.frame_token
-        duration = max(0.1, end - start)
+        duration = max(MIN_CLIP_DURATION, end - start)
         linked_audio = self._linked_audio_source(clip_ref)
         audio_clip = linked_audio or clip_ref
         own_audio_on = clip_ref.use_source_audio if clip_ref is not None else self.keep_audio.get()
@@ -1903,7 +1933,7 @@ class SimpleEditorPanel(tk.Frame):
         token = self.frame_token
         if start is None or end is None:
             start, end = playback_range(self.cursor_time, self.mark_in, self.mark_out, media.duration)
-        duration = max(0.1, end - start)
+        duration = max(MIN_CLIP_DURATION, end - start)
         command = [ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}"]
         clip_ref = self.selected_clip if self.selected_clip and self.selected_clip.media is media else None
         pitch_filter = build_pitch_filter(getattr(clip_ref, "pitch_semitones", 0))

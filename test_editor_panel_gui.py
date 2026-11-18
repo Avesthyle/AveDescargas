@@ -1367,7 +1367,9 @@ class EditorEndToEndTests(unittest.TestCase):
             panel.ui_queue.put(("frame", 9, b"not-a-png"))
             panel.ui_queue.put(("raw_frame", 9, b"short", 1.0))
             panel.ui_queue.put(("progress", "time=00:00:05.00"))
-            panel._poll_after_id = None
+            if panel._poll_after_id:
+                panel.after_cancel(panel._poll_after_id)
+                panel._poll_after_id = None
             panel._poll_queue()
             self.assertIsNotNone(panel._poll_after_id)
             self.assertIn("50%", panel.status.cget("text"))
@@ -1444,6 +1446,100 @@ class EditorEndToEndTests(unittest.TestCase):
         finally:
             panel.destroy()
             self.assertIsNone(panel._poll_after_id)
+            panel = None
+            gc.collect()
+            root.destroy()
+
+    def test_audio_props_clamp_library_cleanup_capture_and_short_playback(self):
+        root = tk.Tk()
+        root.geometry("1200x800+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                a_path = os.path.join(tmp, "short.mp3")
+                v_path = os.path.join(tmp, "vid.mp4")
+                open(a_path, "wb").close()
+                open(v_path, "wb").close()
+                a_media = MediaInfo(path=a_path, duration=5.0, has_video=False, has_audio=True)
+                v_media = MediaInfo(path=v_path, duration=5.0, has_video=True, has_audio=True, width=640, height=360, fps=30.0)
+                vclip = Clip(v_media, source_in=0.0, source_out=3.0, timeline_start=0.0)
+                panel.project.tracks[0].clips = [vclip]
+                panel.selected_clip = vclip
+                panel.selected_media = v_media
+
+                # 1. _apply_audio_props sincroniza spinbox aunque exceda límites o sea NaN/texto inválido
+                panel.volume_var.set(350)
+                panel.fade_in_var.set(9.0)
+                panel.fade_out_var.set(0.0)
+                panel._apply_audio_props()
+                self.assertEqual(panel.volume_var.get(), 200)
+                self.assertAlmostEqual(vclip.volume, 2.0)
+                self.assertAlmostEqual(panel.fade_in_var.get(), 3.0)
+
+                panel.volume_var.set(999)
+                panel._apply_audio_props()
+                self.assertEqual(panel.volume_var.get(), 200)
+
+                panel.fade_in_var.set(float("nan"))
+                panel._apply_audio_props()
+                self.assertAlmostEqual(panel.fade_in_var.get(), 3.0)
+
+                # 2. load_project_dialog bloqueado durante exportación activa
+                panel.exporting = True
+                with mock.patch("simple_editor_panel.filedialog.askopenfilename") as ask_open:
+                    panel.load_project_dialog()
+                    ask_open.assert_not_called()
+                panel.exporting = False
+
+                # 3. delete_track ajusta playhead_timeline al nuevo máximo del proyecto
+                panel.playhead_timeline = 2.8
+                panel.project.selected_track_index = 0
+                panel.delete_track()
+                self.assertEqual(panel.playhead_timeline, 0.0)
+
+                # 4. remove_selected_library_media limpia preview_photo y detiene reproducción
+                panel.media_library = [a_media]
+                panel.media_list.insert("end", "♫ short.mp3")
+                panel.media_list.selection_set(0)
+                panel.selected_media = a_media
+                panel.preview_photo = object()
+                panel.playing = True
+                panel.remove_selected_library_media()
+                self.assertFalse(panel.playing)
+                self.assertIsNone(panel.preview_photo)
+
+                # 5. capture_frame falla si ffmpeg termina sin crear imagen no vacía
+                panel.selected_media = v_media
+                panel.cursor_time = 5.0
+                out_png = os.path.join(tmp, "empty.png")
+                with mock.patch("simple_editor_panel.filedialog.asksaveasfilename", return_value=out_png), \
+                     mock.patch("simple_editor_panel.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+                     mock.patch("simple_editor_panel.subprocess.run", return_value=mock.Mock(returncode=0)), \
+                     mock.patch("simple_editor_panel.messagebox.showerror") as show_err:
+                    panel.capture_frame()
+                    show_err.assert_called_once()
+
+                # 6. _play_audio_only usa MIN_CLIP_DURATION en clips menores a 0.1 s
+                short_clip = Clip(a_media, source_in=1.0, source_out=1.04, timeline_start=0.0)
+                panel.selected_clip = short_clip
+                panel.cursor_time = 1.0
+                panel.mark_in = 1.0
+                panel.mark_out = 1.04
+                fake_proc = mock.Mock()
+                fake_proc.poll.return_value = None
+                fake_proc.wait.return_value = 0
+                with mock.patch("simple_editor_panel.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+                     mock.patch("simple_editor_panel.subprocess.Popen", return_value=fake_proc) as popen_mock:
+                    panel._play_audio_only(a_media, 1.0, 1.04)
+                    cmd = popen_mock.call_args.args[0]
+                    t_idx = cmd.index("-t") + 1
+                    self.assertEqual(cmd[t_idx], "0.040")
+                    panel.stop_playback()
+        finally:
+            panel.destroy()
             panel = None
             gc.collect()
             root.destroy()
