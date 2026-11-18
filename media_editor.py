@@ -137,6 +137,146 @@ def avoid_clip_overlap(raw_start: float, duration: float, ranges: list[tuple[flo
     return min(valid_candidates, key=lambda candidate: abs(candidate - start), default=start)
 
 
+# ---------------------------------------------------------------------------
+# Línea de tiempo magnética
+# ---------------------------------------------------------------------------
+
+SNAP_PIXELS = 12.0
+DEFAULT_TRACK_HEIGHTS = {"video": 56.0, "audio": 64.0}
+MIN_TRACK_HEIGHT = 34.0
+MAX_TRACK_HEIGHT = 220.0
+TRACK_SIZE_PRESETS = {"S": 38.0, "M": 60.0, "L": 110.0}
+
+
+def snap_threshold(zoom: float, pixels: float = SNAP_PIXELS) -> float:
+    """Convierte un radio de enganche en píxeles a segundos según el zoom."""
+    return max(0.02, float(pixels) / max(0.001, float(zoom)))
+
+
+def snap_point(raw: float, candidates: list[float], threshold: float) -> tuple[float, Optional[float]]:
+    """Engancha un único punto (p. ej. el borde que se está recortando) al candidato más cercano."""
+    raw = max(0.0, float(raw))
+    best = None
+    for candidate in candidates:
+        distance = abs(raw - float(candidate))
+        if distance <= threshold and (best is None or distance < best[0]):
+            best = (distance, float(candidate))
+    if best is None:
+        return raw, None
+    return max(0.0, best[1]), best[1]
+
+
+def collect_snap_points(tracks, exclude=(), playhead: Optional[float] = None) -> list[float]:
+    """Puntos magnéticos: inicio del proyecto, cabezal y bordes de todos los clips no excluidos."""
+    excluded = {id(clip) for clip in exclude}
+    points = {0.0}
+    if playhead is not None:
+        points.add(round(max(0.0, float(playhead)), 6))
+    for track in tracks:
+        for clip in track.clips:
+            if id(clip) in excluded:
+                continue
+            points.add(round(clip.timeline_start, 6))
+            points.add(round(clip.timeline_end, 6))
+    return sorted(points)
+
+
+def find_gap(clips: list[Clip], time: float) -> Optional[tuple[float, float]]:
+    """Devuelve el hueco (inicio, fin) que contiene ``time`` o None si cae dentro de un clip o tras el último."""
+    time = float(time)
+    for clip in clips:
+        if clip.timeline_start - 1e-6 <= time < clip.timeline_end - 1e-6:
+            return None
+    gap_start = max((clip.timeline_end for clip in clips if clip.timeline_end <= time + 1e-6), default=0.0)
+    gap_end = min((clip.timeline_start for clip in clips if clip.timeline_start > time - 1e-6), default=None)
+    if gap_end is None or gap_end - gap_start <= 1e-6:
+        return None
+    return gap_start, gap_end
+
+
+def close_gap(clips: list[Clip], time: float) -> float:
+    """Cierra el hueco que contiene ``time`` desplazando a la izquierda los clips posteriores.
+
+    Devuelve los segundos desplazados (0 si no había hueco).
+    """
+    gap = find_gap(clips, time)
+    if gap is None:
+        return 0.0
+    gap_start, gap_end = gap
+    shift = gap_end - gap_start
+    for clip in clips:
+        if clip.timeline_start >= gap_end - 1e-6:
+            clip.timeline_start = round(max(0.0, clip.timeline_start - shift), 6)
+    return shift
+
+
+def ripple_delete(clips: list[Clip], clip: Clip) -> float:
+    """Elimina ``clip`` y junta los clips posteriores para no dejar hueco."""
+    if clip not in clips:
+        return 0.0
+    clips.remove(clip)
+    shift = clip.duration
+    for other in clips:
+        if other.timeline_start >= clip.timeline_end - 1e-6:
+            other.timeline_start = round(max(0.0, other.timeline_start - shift), 6)
+    return shift
+
+
+def compact_clips(clips: list[Clip]) -> dict[int, float]:
+    """Pista magnética: coloca los clips uno detrás de otro desde 0 sin huecos.
+
+    Devuelve ``{id(clip): desplazamiento}`` para poder mover también los clips vinculados.
+    """
+    deltas = {}
+    cursor = 0.0
+    for clip in sorted(clips, key=lambda item: item.timeline_start):
+        delta = cursor - clip.timeline_start
+        if abs(delta) > 1e-9:
+            clip.timeline_start = round(cursor, 6)
+            deltas[id(clip)] = delta
+        cursor = clip.timeline_end
+    return deltas
+
+
+def track_layout(heights: list[float], top: float = 24.0) -> list[tuple[float, float]]:
+    """Calcula (y1, y2) de cada pista acumulando alturas variables."""
+    rows = []
+    current = float(top)
+    for height in heights:
+        rows.append((current, current + float(height)))
+        current += float(height)
+    return rows
+
+
+def track_index_at(layout: list[tuple[float, float]], y: float) -> Optional[int]:
+    for index, (y1, y2) in enumerate(layout):
+        if y1 <= y < y2:
+            return index
+    return None
+
+
+def track_boundary_at(layout: list[tuple[float, float]], y: float, tolerance: float = 6.0) -> Optional[int]:
+    """Índice de la pista cuyo borde inferior está a ``tolerance`` píxeles de ``y``."""
+    best = None
+    for index, (_y1, y2) in enumerate(layout):
+        distance = abs(y - y2)
+        if distance <= tolerance and (best is None or distance < best[0]):
+            best = (distance, index)
+    return None if best is None else best[1]
+
+
+def clamp_track_height(value: float) -> float:
+    return max(MIN_TRACK_HEIGHT, min(MAX_TRACK_HEIGHT, float(value)))
+
+
+def unique_track_name(existing: list[str], kind: str) -> str:
+    base = "Vídeo" if kind == "video" else "Audio"
+    number = 1
+    while f"{base} {number}" in existing:
+        number += 1
+    return f"{base} {number}"
+
+
 @dataclass
 class MediaInfo:
     path: str
@@ -333,7 +473,13 @@ def _parse_fps(value: str) -> float:
 
 
 def discover_ffmpeg_tools() -> tuple[str, str, str]:
+    import sys
+
+    app_dir = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
     candidates = [
+        os.path.join(app_dir, "ffmpeg", "bin"),
+        os.path.join(app_dir, "ffmpeg"),
+        app_dir,
         r"C:\ffmpeg_shared4\ffmpeg-master-latest-win64-gpl-shared\bin",
         r"C:\Program Files\ffmpeg\bin",
         r"C:\ffmpeg\bin",

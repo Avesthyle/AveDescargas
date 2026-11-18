@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from io import BytesIO
 import os
 import pathlib
@@ -38,7 +39,25 @@ from media_editor import (
     waveform_samples,
     waveform_segment,
     timeline_to_source_time,
+    DEFAULT_TRACK_HEIGHTS,
+    TRACK_SIZE_PRESETS,
+    clamp_track_height,
+    close_gap,
+    collect_snap_points,
+    compact_clips,
+    find_gap,
+    ripple_delete,
+    snap_point,
+    snap_threshold,
+    track_boundary_at,
+    track_index_at,
+    track_layout,
+    unique_track_name,
 )
+
+LABEL_WIDTH = 115
+RULER_HEIGHT = 24
+UNDO_LIMIT = 60
 
 
 BG = "#131516"
@@ -100,8 +119,24 @@ class SimpleEditorPanel(tk.Frame):
         self.pitch_options = self._pitch_options()
         self.timeline_items = {}
         self.zoom = 24.0
+        self.magnetic_main = tk.BooleanVar(value=False)
+        self.undo_stack = []
+        self.redo_stack = []
+        self._pending_snapshot = None
+        self.hover_boundary = None
+        self.snap_label = ""
+        self.waveform_pending = set()
+        self.timeline_cursor = 0.0
         self._build_ui()
-        self.after(60, self._poll_queue)
+        self._poll_after_id = self.after(60, self._poll_queue)
+
+    def destroy(self):
+        try:
+            self.after_cancel(self._poll_after_id)
+        except (AttributeError, tk.TclError, ValueError):
+            pass
+        self.stop_playback()
+        super().destroy()
 
     def _button(self, parent, text, command, color=PANEL2, width=None, side="left", padx=3):
         button = tk.Button(
@@ -130,23 +165,38 @@ class SimpleEditorPanel(tk.Frame):
         toolbar = tk.Frame(self, bg=PANEL, padx=10, pady=7)
         toolbar.pack(fill="x")
         tk.Label(toolbar, text="Editor", bg=PANEL, fg=TEXT, font=("Segoe UI", 15, "bold")).pack(side="left", padx=(0, 12))
-        self.select_tool_btn = self._button(toolbar, "↖ Seleccionar (V)", lambda: self.set_tool("select"), BLUE)
-        self.razor_tool_btn = self._button(toolbar, "✂ Cuchilla (C)", lambda: self.set_tool("razor"), PANEL2)
-        self._button(toolbar, "＋ Abrir vídeo o canción", self.open_media, BLUE)
-        self._button(toolbar, "🧲 Ajuste", self.toggle_snap)
-        self._button(toolbar, "＋ Canal vídeo", lambda: self.add_track("video"))
-        self._button(toolbar, "＋ Canal audio", lambda: self.add_track("audio"))
         self._button(toolbar, "Exportar", self.export, GREEN, side="right")
         ttk.Combobox(
             toolbar, textvariable=self.export_mode,
             values=["Todos los canales activos", "Solo el canal seleccionado"],
-            state="readonly", width=26,
+            state="readonly", width=22,
         ).pack(side="right", padx=4)
+        self.select_tool_btn = self._button(toolbar, "↖ Seleccionar (V)", lambda: self.set_tool("select"), BLUE)
+        self.razor_tool_btn = self._button(toolbar, "✂ Cuchilla (C)", lambda: self.set_tool("razor"), PANEL2)
+        self.undo_btn = self._button(toolbar, "↶", self.undo, padx=1)
+        self.redo_btn = self._button(toolbar, "↷", self.redo, padx=1)
+        self.snap_btn = self._button(toolbar, "🧲 Imán ON", self.toggle_snap, BLUE)
+        self._button(toolbar, "＋ Abrir", self.open_media, BLUE)
+        self._button(toolbar, "＋ Vídeo", lambda: self.add_track("video"))
+        self._button(toolbar, "＋ Audio", lambda: self.add_track("audio"))
         self.set_tool("select")
-        self.bind_all("<KeyPress-v>", lambda _event: self.set_tool("select"))
-        self.bind_all("<KeyPress-c>", lambda _event: self.set_tool("razor"))
-        self.bind_all("<space>", self._space_play)
-        self.winfo_toplevel().bind("<space>", self._space_play, add="+")
+        shortcuts = {
+            "<KeyPress-v>": lambda: self.set_tool("select"),
+            "<KeyPress-c>": lambda: self.set_tool("razor"),
+            "<KeyPress-s>": self.split_at_playhead,
+            "<space>": lambda: self.toggle_play(from_mark=True),
+            "<Delete>": self.delete_clip,
+            "<Shift-Delete>": self.ripple_delete_clip,
+            "<BackSpace>": self.delete_clip,
+            "<Control-z>": self.undo,
+            "<Control-Z>": self.redo,
+            "<Control-y>": self.redo,
+            "<Control-k>": self.split_at_playhead,
+            "<Home>": lambda: self._move_playhead(0.0),
+            "<End>": lambda: self._move_playhead(self.project.duration()),
+        }
+        for sequence, handler in shortcuts.items():
+            self.bind_all(sequence, lambda event, handler=handler: self._shortcut(event, handler), add="+")
 
         workspace = tk.PanedWindow(self, orient="horizontal", bg=BG, sashwidth=5, bd=0)
         workspace.pack(fill="both", expand=True, padx=10, pady=(8, 4))
@@ -211,9 +261,23 @@ class SimpleEditorPanel(tk.Frame):
         timeline_header.pack(fill="x")
         tk.Label(timeline_header, text="Línea de tiempo", bg=PANEL, fg=TEXT, font=("Segoe UI", 10, "bold")).pack(side="left")
         self.play_btn = self._button(timeline_header, "▶ Reproducir (Espacio)", self.play_from_cursor, BLUE, side="left")
-        self._button(timeline_header, "✂ Cuchilla", self.cut_selected_clip, BLUE, side="right")
-        self._button(timeline_header, "Eliminar clip", self.delete_clip, "#9f2f2f", side="right")
-        self._button(timeline_header, "Audio del clip ON/OFF", self.toggle_clip_audio, side="right")
+        tk.Checkbutton(
+            timeline_header, text="Pista principal magnética", variable=self.magnetic_main,
+            command=self._magnetic_toggled, bg=PANEL, fg=TEXT, selectcolor=PANEL2,
+            activebackground=PANEL, activeforeground=TEXT, font=("Segoe UI", 9),
+        ).pack(side="left", padx=(10, 4))
+        self._button(timeline_header, "✂ Dividir (S)", self.split_at_playhead, BLUE, side="right")
+        size_box = tk.Frame(timeline_header, bg=PANEL)
+        size_box.pack(side="right", padx=(4, 8))
+        tk.Label(size_box, text="Altura", bg=PANEL, fg=MUTED, font=("Segoe UI", 8)).pack(side="left", padx=(0, 2))
+        for preset in ("S", "M", "L"):
+            self._button(size_box, preset, lambda preset=preset: self.set_all_track_heights(preset), padx=1)
+        zoom_box = tk.Frame(timeline_header, bg=PANEL)
+        zoom_box.pack(side="right", padx=4)
+        tk.Label(zoom_box, text="Zoom", bg=PANEL, fg=MUTED, font=("Segoe UI", 8)).pack(side="left", padx=(0, 2))
+        self._button(zoom_box, "−", lambda: self.set_zoom(self.zoom / 1.25), padx=1)
+        self._button(zoom_box, "＋", lambda: self.set_zoom(self.zoom * 1.25), padx=1)
+        self._button(zoom_box, "Ajustar", self.zoom_to_fit, padx=1)
 
         canvas_box = tk.Frame(timeline_panel, bg=PANEL)
         canvas_box.pack(fill="both", expand=True, padx=8, pady=(0, 7))
@@ -226,13 +290,18 @@ class SimpleEditorPanel(tk.Frame):
         xscroll.grid(row=1, column=0, sticky="ew")
         canvas_box.rowconfigure(0, weight=1)
         canvas_box.columnconfigure(0, weight=1)
-        self.timeline.bind("<Button-1>", self._timeline_press)
+        self.timeline.bind("<ButtonPress-1>", self._timeline_press)
         self.timeline.bind("<ButtonPress-1>", self._timeline_playhead_press, add="+")
-        self.timeline.bind("<B1-Motion>", self._timeline_playhead_drag, add="+")
-        self.timeline.bind("<Button-2>", self._temporary_razor_press)
-        self.timeline.bind("<ButtonRelease-2>", self._temporary_razor_release)
         self.timeline.bind("<B1-Motion>", self._timeline_drag)
         self.timeline.bind("<ButtonRelease-1>", self._timeline_release)
+        self.timeline.bind("<Button-2>", self._temporary_razor_press)
+        self.timeline.bind("<ButtonRelease-2>", self._temporary_razor_release)
+        self.timeline.bind("<Button-3>", self._timeline_context_menu)
+        self.timeline.bind("<Motion>", self._timeline_hover)
+        self.timeline.bind("<Leave>", lambda _event: self._set_hover_boundary(None))
+        self.timeline.bind("<MouseWheel>", self._timeline_wheel)
+        self.timeline.bind("<Button-4>", lambda event: self._timeline_wheel(event, 120))
+        self.timeline.bind("<Button-5>", lambda event: self._timeline_wheel(event, -120))
         self._install_drop_target(self.timeline)
         self._install_drop_target(self.media_list)
 
@@ -240,16 +309,314 @@ class SimpleEditorPanel(tk.Frame):
         self.status.pack(fill="x")
         self.add_track("video")
         self.add_track("audio")
+        self.undo_stack.clear()
+        self._update_undo_buttons()
 
     def add_track(self, kind):
-        count = sum(track.kind == kind for track in self.project.tracks) + 1
-        name = f"Vídeo {count}" if kind == "video" else f"Audio {count}"
+        self._push_undo()
+        name = unique_track_name([track.name for track in self.project.tracks], kind)
         track = Track(name, kind)
         self.project.tracks.append(track)
         self.project.selected_track_index = len(self.project.tracks) - 1
         self._refresh_tracks()
         self.redraw_timeline()
         return track
+
+    # ------------------------------------------------------------------
+    # Atajos, deshacer/rehacer
+    # ------------------------------------------------------------------
+
+    def _shortcut(self, event, handler):
+        """Ejecuta un atajo solo si el editor está visible y no se está escribiendo en un campo de texto."""
+        try:
+            if not self.winfo_ismapped():
+                return None
+            focus = self.focus_get()
+        except (KeyError, tk.TclError):
+            focus = None
+        if isinstance(focus, (tk.Entry, ttk.Entry, tk.Text, tk.Spinbox, ttk.Spinbox)) and not isinstance(focus, ttk.Combobox):
+            return None
+        if isinstance(focus, ttk.Combobox) and str(focus.cget("state")) != "readonly":
+            return None
+        handler()
+        return "break"
+
+    def _snapshot(self):
+        return copy.deepcopy((self.project.tracks, self.project.selected_track_index, self.track_heights))
+
+    def _push_undo(self, snapshot=None):
+        if not hasattr(self, "undo_btn"):
+            return
+        self.undo_stack.append(snapshot if snapshot is not None else self._snapshot())
+        del self.undo_stack[:-UNDO_LIMIT]
+        self.redo_stack.clear()
+        self._update_undo_buttons()
+
+    def _restore(self, snapshot):
+        tracks, selected_index, heights = copy.deepcopy(snapshot)
+        self.project.tracks = tracks
+        self.project.selected_track_index = selected_index
+        self.track_heights = heights
+        self.selected_clip = None
+        self.drag_clip = None
+        self._refresh_tracks()
+        self._update_inspector()
+        self.redraw_timeline()
+
+    def undo(self):
+        if not self.undo_stack:
+            self.status.configure(text="No hay nada que deshacer.", fg=MUTED)
+            return
+        self.redo_stack.append(self._snapshot())
+        self._restore(self.undo_stack.pop())
+        self._update_undo_buttons()
+        self.status.configure(text="Deshecho (Ctrl+Z). Rehacer con Ctrl+Y.", fg=YELLOW)
+
+    def redo(self):
+        if not self.redo_stack:
+            self.status.configure(text="No hay nada que rehacer.", fg=MUTED)
+            return
+        self.undo_stack.append(self._snapshot())
+        self._restore(self.redo_stack.pop())
+        self._update_undo_buttons()
+        self.status.configure(text="Rehecho (Ctrl+Y).", fg=YELLOW)
+
+    def _update_undo_buttons(self):
+        if hasattr(self, "undo_btn"):
+            self.undo_btn.configure(fg=TEXT if self.undo_stack else MUTED)
+            self.redo_btn.configure(fg=TEXT if self.redo_stack else MUTED)
+
+    # ------------------------------------------------------------------
+    # Geometría de pistas
+    # ------------------------------------------------------------------
+
+    def _row_height(self, track):
+        return self.track_heights.get(track.name, DEFAULT_TRACK_HEIGHTS.get(track.kind, 56.0))
+
+    def _layout(self):
+        return track_layout([self._row_height(track) for track in self.project.tracks], RULER_HEIGHT)
+
+    def _time_at_x(self, canvas_x):
+        return max(0.0, (canvas_x - LABEL_WIDTH) / self.zoom)
+
+    def _x_at_time(self, seconds):
+        return LABEL_WIDTH + seconds * self.zoom
+
+    def _track_at_y(self, canvas_y):
+        index = track_index_at(self._layout(), canvas_y)
+        return None if index is None else self.project.tracks[index]
+
+    def set_all_track_heights(self, preset):
+        self._push_undo()
+        for track in self.project.tracks:
+            self.track_heights[track.name] = TRACK_SIZE_PRESETS[preset]
+        self.redraw_timeline()
+
+    def set_zoom(self, value, anchor_time=None):
+        old_zoom = self.zoom
+        self.zoom = max(2.0, min(400.0, float(value)))
+        if anchor_time is None:
+            anchor_time = self.playhead_timeline
+        self.redraw_timeline()
+        region = self.timeline.cget("scrollregion").split()
+        if region and old_zoom != self.zoom:
+            total = float(region[2]) or 1.0
+            left = max(0.0, self._x_at_time(anchor_time) - self.timeline.winfo_width() / 2)
+            self.timeline.xview_moveto(left / total)
+        self.status.configure(text=f"Zoom: {self.zoom:.0f} px/s", fg=MUTED)
+
+    def zoom_to_fit(self):
+        duration = max(5.0, self.project.duration())
+        width = max(200, self.timeline.winfo_width() - LABEL_WIDTH - 20)
+        self.set_zoom(width / duration, anchor_time=0.0)
+        self.timeline.xview_moveto(0)
+
+    def _timeline_wheel(self, event, delta=None):
+        delta = delta if delta is not None else event.delta
+        step = 1 if delta > 0 else -1
+        ctrl = bool(event.state & 0x0004)
+        shift = bool(event.state & 0x0001)
+        alt = bool(event.state & 0x20000) or bool(event.state & 0x0008)
+        x = self.timeline.canvasx(event.x)
+        y = self.timeline.canvasy(event.y)
+        if ctrl:
+            track = self._track_at_y(y)
+            if track:
+                self.track_heights[track.name] = clamp_track_height(self._row_height(track) + step * 8)
+                self.redraw_timeline()
+        elif alt:
+            self.set_zoom(self.zoom * (1.2 if step > 0 else 1 / 1.2), anchor_time=self._time_at_x(x))
+        elif shift:
+            self.timeline.xview_scroll(-step * 3, "units")
+        else:
+            self.timeline.yview_scroll(-step * 2, "units")
+        return "break"
+
+    def _set_hover_boundary(self, index):
+        if index != self.hover_boundary:
+            self.hover_boundary = index
+            self.redraw_timeline()
+
+    def _timeline_hover(self, event):
+        if self.drag_clip or self.resize_track_index is not None:
+            return
+        x = self.timeline.canvasx(event.x)
+        y = self.timeline.canvasy(event.y)
+        boundary = track_boundary_at(self._layout(), y)
+        self._set_hover_boundary(boundary)
+        if boundary is not None:
+            self.timeline.configure(cursor="sb_v_double_arrow")
+            return
+        hit = self._clip_at(x, y)
+        if hit is None:
+            self.timeline.configure(cursor="")
+        elif self.tool_mode == "razor":
+            self.timeline.configure(cursor="crosshair")
+        else:
+            _track, clip = hit
+            x1 = self._x_at_time(clip.timeline_start)
+            x2 = x1 + max(14, clip.duration * self.zoom)
+            near_edge = abs(x - x1) <= 8 or abs(x - x2) <= 8
+            self.timeline.configure(cursor="sb_h_double_arrow" if near_edge else "fleur")
+
+    def _clip_at(self, x, y):
+        items = self.timeline.find_overlapping(x, y, x, y)
+        item = next((item for item in reversed(items) if item in self.timeline_items), None)
+        return None if item is None else self.timeline_items[item]
+
+    # ------------------------------------------------------------------
+    # Edición magnética
+    # ------------------------------------------------------------------
+
+    def _track_of(self, clip):
+        return next((track for track in self.project.tracks if clip in track.clips), None)
+
+    def _linked_clips(self, clip):
+        if not clip or not clip.link_group:
+            return []
+        return [other for track in self.project.tracks for other in track.clips
+                if other is not clip and other.link_group == clip.link_group]
+
+    def _main_track(self):
+        return next((track for track in self.project.tracks if track.kind == "video"), None)
+
+    def _apply_magnetic(self):
+        """Si la pista principal magnética está activa, junta sus clips desde 0 sin huecos."""
+        if not self.magnetic_main.get():
+            return
+        main = self._main_track()
+        if not main:
+            return
+        before = {id(clip): clip for clip in main.clips}
+        deltas = compact_clips(main.clips)
+        for clip_id, delta in deltas.items():
+            for linked in self._linked_clips(before[clip_id]):
+                linked.timeline_start = round(max(0.0, linked.timeline_start + delta), 6)
+
+    def _magnetic_toggled(self):
+        if self.magnetic_main.get():
+            self._push_undo()
+            self._apply_magnetic()
+            self.status.configure(text="Pista principal magnética: los clips de Vídeo 1 se mantienen juntos, sin huecos.", fg=GREEN)
+        else:
+            self.status.configure(text="Pista principal magnética desactivada.", fg=YELLOW)
+        self.redraw_timeline()
+
+    def _move_playhead(self, seconds):
+        self.playhead_timeline = max(0.0, float(seconds))
+        self._seek_timeline(type("SeekEvent", (), {"x": self._x_at_time(self.playhead_timeline) - self.timeline.canvasx(0)})())
+
+    def split_at_playhead(self):
+        """Divide en el cabezal el clip seleccionado (o los clips bajo el cabezal en la pista seleccionada)."""
+        time_point = self.playhead_timeline
+        targets = []
+        if self.selected_clip and self.selected_clip.timeline_start < time_point < self.selected_clip.timeline_end:
+            targets = [self.selected_clip] + self._linked_clips(self.selected_clip)
+        else:
+            track = self.project.selected_track()
+            if track:
+                targets = [clip for clip in track.clips if clip.timeline_start < time_point < clip.timeline_end]
+        targets = [clip for clip in targets if split_clip(clip, time_point) is not None]
+        if not targets:
+            self.status.configure(text="Coloca el cabezal dentro de un clip para dividirlo (S).", fg=YELLOW)
+            return
+        self._push_undo()
+        for clip in targets:
+            track = self._track_of(clip)
+            left, right = split_clip(clip, time_point)
+            if clip.link_group:
+                right.link_group = clip.link_group + "-b"
+            index = track.clips.index(clip)
+            track.clips[index:index + 1] = [left, right]
+            if clip is self.selected_clip:
+                self.selected_clip = left
+        self._update_inspector()
+        self.redraw_timeline()
+        self.status.configure(text=f"Clip dividido en {format_editor_time(time_point)}.", fg=GREEN)
+
+    def ripple_delete_clip(self):
+        clip = self.selected_clip
+        track = self._track_of(clip) if clip else None
+        if not track:
+            self.status.configure(text="Selecciona un clip para borrarlo y cerrar el hueco (Shift+Supr).", fg=YELLOW)
+            return
+        self._push_undo()
+        for linked in self._linked_clips(clip):
+            linked_track = self._track_of(linked)
+            if linked_track:
+                ripple_delete(linked_track.clips, linked)
+        ripple_delete(track.clips, clip)
+        self.selected_clip = None
+        self._apply_magnetic()
+        self._update_inspector()
+        self.redraw_timeline()
+        self.status.configure(text="Clip eliminado y hueco cerrado.", fg=GREEN)
+
+    def close_gap_at(self, track, time_point):
+        if find_gap(track.clips, time_point) is None:
+            self.status.configure(text="Ahí no hay ningún hueco que cerrar.", fg=YELLOW)
+            return
+        self._push_undo()
+        shift = close_gap(track.clips, time_point)
+        self.redraw_timeline()
+        self.status.configure(text=f"Hueco de {format_editor_time(shift)} cerrado en {track.name}.", fg=GREEN)
+
+    def _timeline_context_menu(self, event):
+        x = self.timeline.canvasx(event.x)
+        y = self.timeline.canvasy(event.y)
+        track = self._track_at_y(y)
+        if not track:
+            return
+        time_point = self._time_at_x(x)
+        menu = tk.Menu(self, tearoff=0, bg=PANEL2, fg=TEXT, activebackground=BLUE, activeforeground="#ffffff")
+        hit = self._clip_at(x, y)
+        if hit:
+            _track, clip = hit
+            self.selected_clip = clip
+            self.selected_media = clip.media
+            self._update_inspector()
+            self.redraw_timeline()
+            menu.add_command(label="Dividir en el cabezal    S", command=self.split_at_playhead)
+            menu.add_command(label="Eliminar    Supr", command=self.delete_clip)
+            menu.add_command(label="Eliminar y cerrar hueco    Shift+Supr", command=self.ripple_delete_clip)
+            menu.add_separator()
+            menu.add_command(label="Audio del clip ON/OFF", command=self.toggle_clip_audio)
+        else:
+            state = "normal" if find_gap(track.clips, time_point) else "disabled"
+            menu.add_command(label="Cerrar hueco", state=state, command=lambda: self.close_gap_at(track, time_point))
+        menu.add_separator()
+        for preset, label in (("S", "pequeña"), ("M", "mediana"), ("L", "grande")):
+            menu.add_command(label=f"Altura de {track.name}: {label}",
+                             command=lambda preset=preset, track=track: self._set_track_height(track, TRACK_SIZE_PRESETS[preset]))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _set_track_height(self, track, height):
+        self._push_undo()
+        self.track_heights[track.name] = clamp_track_height(height)
+        self.redraw_timeline()
 
     def _install_drop_target(self, widget):
         try:
@@ -311,8 +678,10 @@ class SimpleEditorPanel(tk.Frame):
 
     def toggle_snap(self):
         self.snap_enabled.set(not self.snap_enabled.get())
-        state = "activado" if self.snap_enabled.get() else "desactivado"
-        self.status.configure(text=f"Ajuste magnético {state}. Mantén Alt para desactivarlo temporalmente.", fg=YELLOW)
+        enabled = self.snap_enabled.get()
+        self.snap_btn.configure(text="🧲 Imán ON" if enabled else "🧲 Imán OFF", bg=BLUE if enabled else PANEL2)
+        state = "activado" if enabled else "desactivado"
+        self.status.configure(text=f"Imán {state}. Mantén Alt al arrastrar para desactivarlo temporalmente.", fg=YELLOW)
 
     def set_tool(self, mode):
         if mode not in {"select", "razor"}:
@@ -408,7 +777,9 @@ class SimpleEditorPanel(tk.Frame):
     def delete_track(self):
         index = self.project.selected_track_index
         if 0 <= index < len(self.project.tracks):
-            del self.project.tracks[index]
+            self._push_undo()
+            removed = self.project.tracks.pop(index)
+            self.track_heights.pop(removed.name, None)
             self.project.selected_track_index = max(0, min(index, len(self.project.tracks) - 1))
             self.selected_clip = None
             self._refresh_tracks()
@@ -465,24 +836,24 @@ class SimpleEditorPanel(tk.Frame):
         self.pending_library_media = None
         if not media:
             return False
-        y = self.timeline.canvasy(event.y)
-        track = None
-        current = 24
-        for item in self.project.tracks:
-            height = self.track_heights.get(item.name, 64 if item.kind == "audio" else 48)
-            if current <= y <= current + height:
-                track = item
-                break
-            current += height
+        track = self._track_at_y(self.timeline.canvasy(event.y))
         if not track or (track.kind == "video" and not media.has_video) or (track.kind == "audio" and not media.has_audio):
             self.status.configure(text="Suelta el archivo en un canal compatible.", fg=RED)
             return True
-        start = max(0.0, (self.timeline.canvasx(event.x) - 115) / self.zoom)
-        clip = Clip(media, timeline_start=start, name=pathlib.Path(media.path).stem)
+        self._push_undo()
+        raw_start = self._time_at_x(self.timeline.canvasx(event.x))
+        clip = Clip(media, timeline_start=raw_start, name=pathlib.Path(media.path).stem)
+        if self.snap_enabled.get():
+            points = collect_snap_points(self.project.tracks, playhead=self.playhead_timeline)
+            raw_start, _target = snap_timeline_position(raw_start, clip.duration, points, snap_threshold(self.zoom))
+        ranges = [(other.timeline_start, other.timeline_end) for other in track.clips]
+        clip.timeline_start = round(avoid_clip_overlap(raw_start, clip.duration, ranges), 6)
         track.clips.append(clip)
         self.selected_clip = clip
         self.selected_media = media
         self.project.selected_track_index = self.project.tracks.index(track)
+        if track is self._main_track():
+            self._apply_magnetic()
         self._refresh_tracks()
         self._update_inspector()
         self.redraw_timeline()
@@ -504,16 +875,8 @@ class SimpleEditorPanel(tk.Frame):
         self.keep_audio_check.configure(state="normal" if self.selected_media.has_audio else "disabled")
         self.status.configure(text="Archivo cargado. Arrástralo a un canal inferior para editarlo.", fg=TEXT)
 
-    def _scrub(self, value):
-        if not self.selected_media or self.playing:
-            return
-        self.cursor_time = clamp_media_time(float(value), self.selected_media.duration)
-        self._update_source_ui()
-        if self.selected_media.has_video:
-            self.request_frame(self.cursor_time)
-
     def _seek_timeline(self, event):
-        self.playhead_timeline = max(0.0, (self.timeline.canvasx(event.x) - 115) / self.zoom)
+        self.playhead_timeline = self._time_at_x(self.timeline.canvasx(event.x))
         clip = next((clip for track in reversed(self.project.tracks) if track.enabled for clip in track.clips
                      if timeline_to_source_time(clip, self.playhead_timeline) is not None), None)
         if clip:
@@ -532,18 +895,14 @@ class SimpleEditorPanel(tk.Frame):
     def _scrub(self, value):
         if self.playing:
             return
-        self.playhead_timeline = max(0.0, float(value))
-        self._seek_timeline(type("SeekEvent", (), {"x": 115 + self.playhead_timeline * self.zoom})())
+        self._move_playhead(float(value))
 
     def _timeline_playhead_press(self, event):
         x = self.timeline.canvasx(event.x)
         y = self.timeline.canvasy(event.y)
-        hit = self.timeline.find_overlapping(x, y, x, y)
-        if not any(item in self.timeline_items for item in hit):
-            self._seek_timeline(event)
-
-    def _timeline_playhead_drag(self, event):
-        if not self.drag_clip and self.resize_track_index is None:
+        if self.resize_track_index is not None or track_boundary_at(self._layout(), y) is not None:
+            return
+        if self._clip_at(x, y) is None:
             self._seek_timeline(event)
 
     def request_frame(self, seconds):
@@ -720,12 +1079,6 @@ class SimpleEditorPanel(tk.Frame):
         self.mark_in, self.mark_out = normalize_selection(self.mark_in, self.cursor_time, self.selected_media.duration)
         self._update_source_ui()
 
-    def _update_source_ui(self):
-        media = self.selected_media
-        if not media:
-            return
-        return
-
     def add_selection(self):
         media = self.selected_media
         if not media:
@@ -761,10 +1114,22 @@ class SimpleEditorPanel(tk.Frame):
             self.status.configure(text="Selecciona un clip de la línea de tiempo y coloca el cursor donde quieras cortar.", fg=YELLOW)
             return
         timeline_cut = clip.timeline_start + (self.cursor_time - clip.source_in)
+        if self.snap_enabled.get():
+            timeline_cut, _target = snap_point(timeline_cut, self._snap_points_for(clip), snap_threshold(self.zoom))
         pieces = split_clip(clip, timeline_cut)
         if pieces is None:
             self.status.configure(text="La cuchilla debe estar dentro del clip, no en sus extremos.", fg=YELLOW)
             return
+        self._push_undo()
+        for linked in self._linked_clips(clip):
+            linked_pieces = split_clip(linked, timeline_cut)
+            linked_track = self._track_of(linked)
+            if linked_pieces and linked_track:
+                linked_pieces[1].link_group = (linked.link_group or "") + "-b"
+                index = linked_track.clips.index(linked)
+                linked_track.clips[index:index + 1] = list(linked_pieces)
+        if clip.link_group:
+            pieces[1].link_group = clip.link_group + "-b"
         for track in self.project.tracks:
             if clip in track.clips:
                 index = track.clips.index(clip)
@@ -774,7 +1139,7 @@ class SimpleEditorPanel(tk.Frame):
                 self._refresh_tracks()
                 self._update_inspector()
                 self.redraw_timeline()
-                self.status.configure(text="Clip dividido en dos tramos editables.", fg=GREEN)
+                self.status.configure(text=f"Clip dividido en {format_editor_time(timeline_cut)}.", fg=GREEN)
                 return
 
     def _replace_clip(self, track, old_clip, new_clip):
@@ -783,81 +1148,141 @@ class SimpleEditorPanel(tk.Frame):
         self.selected_clip = new_clip
         self.drag_clip = new_clip
 
+    def _request_waveform(self, path):
+        if path in self.waveform_cache or path in self.waveform_pending:
+            return
+        self.waveform_pending.add(path)
+
+        def worker():
+            try:
+                samples = waveform_samples(path, 640)
+            except Exception:
+                samples = []
+            self.ui_queue.put(("waveform", path, samples))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @staticmethod
+    def _ruler_step(zoom):
+        for step in (0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600):
+            if step * zoom >= 70:
+                return step
+        return 1200
+
     def redraw_timeline(self):
         self.timeline.delete("all")
         self.timeline_items.clear()
-        label_width = 115
+        layout = self._layout()
         duration = max(30.0, self.project.duration() + 5)
-        total_width = label_width + duration * self.zoom
-        total_height = 24 + sum(self.track_heights.get(item.name, 64 if item.kind == "audio" else 48) for item in self.project.tracks)
-        for second in range(0, int(duration) + 1, 5):
-            x = label_width + second * self.zoom
-            self.timeline.create_line(x, 0, x, max(190, total_height + 8), fill="#262b2f")
-            self.timeline.create_text(x + 2, 8, text=format_editor_time(second), fill=MUTED, anchor="nw", font=("Segoe UI", 7))
+        visible_width = max(1, self.timeline.winfo_width())
+        total_width = max(visible_width, LABEL_WIDTH + duration * self.zoom)
+        total_height = max(190, (layout[-1][1] if layout else RULER_HEIGHT) + 8)
+
+        # Regla de tiempo adaptativa al zoom.
+        self.timeline.create_rectangle(0, 0, total_width, RULER_HEIGHT, fill="#111314", outline="")
+        step = self._ruler_step(self.zoom)
+        tick = 0.0
+        while tick <= duration:
+            x = self._x_at_time(tick)
+            self.timeline.create_line(x, RULER_HEIGHT - 8, x, total_height, fill="#22272b")
+            self.timeline.create_text(x + 3, 4, text=format_editor_time(tick), fill=MUTED, anchor="nw", font=("Segoe UI", 7))
+            minor = step / 5
+            for index in range(1, 5):
+                mx = self._x_at_time(tick + minor * index)
+                self.timeline.create_line(mx, RULER_HEIGHT - 4, mx, RULER_HEIGHT, fill="#3a4045")
+            tick += step
+
+        selected_index = self.project.selected_track_index
         for row, track in enumerate(self.project.tracks):
-            row_height = self.track_heights.get(track.name, 64 if track.kind == "audio" else 48)
-            y1 = 24 + row * row_height
-            y2 = y1 + row_height - 4
-            self.timeline.create_rectangle(0, y1, total_width, y2, fill="#151719", outline=LINE)
+            y1, y2 = layout[row]
+            inner_bottom = y2 - 3
+            self.timeline.create_rectangle(LABEL_WIDTH, y1, total_width, inner_bottom, fill="#151719", outline="")
+            label_bg = "#20262b" if row == selected_index else "#181b1d"
+            self.timeline.create_rectangle(0, y1, LABEL_WIDTH - 2, inner_bottom, fill=label_bg, outline="")
             label = track.name + ("  OFF" if not track.enabled else "") + ("  M" if track.muted else "")
-            self.timeline.create_text(7, (y1 + y2) / 2, text=label, fill=TEXT if track.enabled else MUTED, anchor="w", font=("Segoe UI", 8))
+            self.timeline.create_text(8, (y1 + inner_bottom) / 2, text=label, fill=TEXT if track.enabled else MUTED, anchor="w", font=("Segoe UI", 8, "bold" if row == selected_index else "normal"))
+            if self.magnetic_main.get() and track is self._main_track():
+                self.timeline.create_text(LABEL_WIDTH - 8, y1 + 4, text="🧲", fill=YELLOW, anchor="ne", font=("Segoe UI", 7))
             for clip in track.clips:
-                x1 = label_width + clip.timeline_start * self.zoom
+                x1 = self._x_at_time(clip.timeline_start)
                 x2 = x1 + max(14, clip.duration * self.zoom)
                 color = "#126da8" if track.kind == "video" else "#28784a"
-                outline = YELLOW if clip is self.selected_clip else "#78a9c8"
-                item = self.timeline.create_rectangle(x1, y1 + 4, x2, y2 - 4, fill=color, outline=outline, width=2 if clip is self.selected_clip else 1)
-                self.timeline.create_text(x1 + 5, (y1 + y2) / 2, text=clip.name, fill="#ffffff", anchor="w", font=("Segoe UI", 8))
+                selected = clip is self.selected_clip
+                outline = YELLOW if selected else "#78a9c8"
+                item = self.timeline.create_rectangle(x1, y1 + 4, x2, inner_bottom - 3, fill=color, outline=outline, width=2 if selected else 1)
                 self.timeline_items[item] = (track, clip)
                 if clip.media.has_audio:
                     samples = self.waveform_cache.get(clip.media.path)
                     if samples is None:
-                        samples = waveform_samples(clip.media.path, 640)
-                        self.waveform_cache[clip.media.path] = samples
-                    samples = waveform_segment(samples, clip.source_in, clip.source_out, clip.media.duration, 160)
-                    mid = (y1 + y2) / 2
-                    height = max(4, (y2 - y1 - 10) / 2) if track.kind == "audio" else max(3, (y2 - y1 - 14) / 3)
-                    self.timeline.create_line(x1, mid, x2, mid, fill="#78a984", width=1)
-                    points = []
-                    for index, peak in enumerate(samples):
-                        px = x1 + (index / max(1, len(samples) - 1)) * max(4, x2 - x1)
-                        points.extend((px, mid - peak * height, px, mid + peak * height))
-                    for index in range(0, len(points) - 2, 4):
-                        self.timeline.create_line(points[index], points[index + 1], points[index + 2], points[index + 3], fill="#c3f3d0", width=2)
-                if clip is self.selected_clip:
-                    left_handle = self.timeline.create_rectangle(x1, y1 + 2, x1 + 6, y2 - 2, fill=YELLOW, outline="")
-                    right_handle = self.timeline.create_rectangle(x2 - 6, y1 + 2, x2, y2 - 2, fill=YELLOW, outline="")
+                        self._request_waveform(clip.media.path)
+                    elif samples:
+                        count = int(max(8, min(400, (x2 - x1) / 3)))
+                        segment = waveform_segment(samples, clip.source_in, clip.source_out, clip.media.duration, count)
+                        mid = (y1 + inner_bottom) / 2 + (6 if track.kind == "video" else 0)
+                        height = max(4, (inner_bottom - y1 - 12) / 2) if track.kind == "audio" else max(3, (inner_bottom - y1 - 16) / 3)
+                        for index, peak in enumerate(segment):
+                            px = x1 + (index / max(1, len(segment) - 1)) * max(4, x2 - x1)
+                            self.timeline.create_line(px, mid - peak * height, px, mid + peak * height, fill="#c3f3d0", width=2)
+                name = ("🔗 " if clip.link_group else "") + clip.name
+                self.timeline.create_text(x1 + 6, y1 + 7, text=name, fill="#ffffff", anchor="nw", font=("Segoe UI", 8))
+                if selected:
+                    left_handle = self.timeline.create_rectangle(x1, y1 + 2, x1 + 6, inner_bottom - 1, fill=YELLOW, outline="")
+                    right_handle = self.timeline.create_rectangle(x2 - 6, y1 + 2, x2, inner_bottom - 1, fill=YELLOW, outline="")
                     self.timeline_items[left_handle] = (track, clip)
                     self.timeline_items[right_handle] = (track, clip)
-        playhead_x = label_width + self.playhead_timeline * self.zoom
-        self.timeline.create_line(playhead_x, 0, playhead_x, max(190, len(self.project.tracks) * 64 + 24), fill="#f2f4f5", width=2)
-        if self.snap_target is not None:
-            guide_x = label_width + self.snap_target * self.zoom
-            self.timeline.create_line(guide_x, 0, guide_x, max(190, len(self.project.tracks) * row_height + 24), fill="#ffcf4a", width=2, dash=(4, 3))
-        self.timeline.configure(scrollregion=(0, 0, total_width, max(190, total_height + 8)))
+            # Separador redimensionable entre pistas.
+            active = row in (self.hover_boundary, self.resize_track_index)
+            self.timeline.create_rectangle(0, y2 - 3, total_width, y2, fill=BLUE if active else "#2b3136", outline="")
+            grip_x = LABEL_WIDTH / 2
+            for offset in (-6, 0, 6):
+                self.timeline.create_line(grip_x + offset - 2, y2 - 1.5, grip_x + offset + 2, y2 - 1.5, fill=TEXT if active else MUTED)
 
-    def _track_boundary_at(self, y):
-        current = 24
-        for index, track in enumerate(self.project.tracks[:-1]):
-            current += self.track_heights.get(track.name, 64 if track.kind == "audio" else 48)
-            if abs(y - current) <= 4:
-                return index
-        return None
+        playhead_x = self._x_at_time(self.playhead_timeline)
+        self.timeline.create_line(playhead_x, 0, playhead_x, total_height, fill="#f2f4f5", width=2)
+        self.timeline.create_polygon(playhead_x - 6, 0, playhead_x + 6, 0, playhead_x, 9, fill="#f2f4f5", outline="")
+        if self.snap_target is not None:
+            guide_x = self._x_at_time(self.snap_target)
+            self.timeline.create_line(guide_x, 0, guide_x, total_height, fill="#ffcf4a", width=2, dash=(4, 3))
+            text = self.snap_label or format_editor_time(self.snap_target)
+            label_id = self.timeline.create_text(guide_x + 6, RULER_HEIGHT + 2, text=text, fill="#111111", anchor="nw", font=("Segoe UI", 8, "bold"))
+            bbox = self.timeline.bbox(label_id)
+            if bbox:
+                background = self.timeline.create_rectangle(bbox[0] - 3, bbox[1] - 1, bbox[2] + 3, bbox[3] + 1, fill="#ffcf4a", outline="")
+                self.timeline.tag_lower(background, label_id)
+        self.timeline.configure(scrollregion=(0, 0, total_width, total_height))
+
+    def _alt_pressed(self, event):
+        return bool(getattr(event, "state", 0) & (0x0008 | 0x20000))
+
+    def _snap_points_for(self, clip):
+        exclude = [clip] + self._linked_clips(clip)
+        return collect_snap_points(self.project.tracks, exclude=exclude, playhead=self.playhead_timeline)
+
+    def _describe_snap(self, target):
+        if target is None:
+            return ""
+        if abs(target - self.playhead_timeline) < 1e-6:
+            return f"Cabezal · {format_editor_time(target)}"
+        if abs(target) < 1e-6:
+            return "Inicio · 00:00"
+        return f"Clip · {format_editor_time(target)}"
 
     def _snap_start(self, track, clip, raw_start, alt=False):
         if not self.snap_enabled.get() or alt:
             self.snap_target = None
             return max(0.0, raw_start)
-        candidates = []
-        for other_track in self.project.tracks:
-            for other in other_track.clips:
-                if other is clip:
-                    continue
-                candidates.extend((other.timeline_start, other.timeline_end))
-        candidates.append(getattr(self, "timeline_cursor", 0.0))
-        threshold = max(0.08, 8.0 / self.zoom)
-        snapped, target = snap_timeline_position(raw_start, clip.duration, candidates, threshold)
+        snapped, target = snap_timeline_position(raw_start, clip.duration, self._snap_points_for(clip), snap_threshold(self.zoom))
         self.snap_target = target
+        self.snap_label = self._describe_snap(target)
+        return snapped
+
+    def _snap_edge(self, clip, raw_edge, alt=False):
+        if not self.snap_enabled.get() or alt:
+            self.snap_target = None
+            return max(0.0, raw_edge)
+        snapped, target = snap_point(raw_edge, self._snap_points_for(clip), snap_threshold(self.zoom))
+        self.snap_target = target
+        self.snap_label = self._describe_snap(target)
         return snapped
 
     def _timeline_press(self, event):
@@ -865,16 +1290,24 @@ class SimpleEditorPanel(tk.Frame):
             return
         x = self.timeline.canvasx(event.x)
         y = self.timeline.canvasy(event.y)
-        boundary = self._track_boundary_at(y)
+        self.scrubbing = False
+        boundary = track_boundary_at(self._layout(), y)
         if boundary is not None:
             self.resize_track_index = boundary
+            track = self.project.tracks[boundary]
+            self._resize_origin = (y, self._row_height(track))
+            self._pending_snapshot = self._snapshot()
             self.drag_clip = None
             return
-        items = self.timeline.find_overlapping(x, y, x, y)
-        item = next((item for item in reversed(items) if item in self.timeline_items), None)
-        if item is None:
-            self.playhead_timeline = max(0.0, (x - 115) / self.zoom)
+        hit = self._clip_at(x, y)
+        if hit is None:
+            self.scrubbing = True
+            self.playhead_timeline = self._time_at_x(x)
             self.status.configure(text=f"Cabezal: {format_editor_time(self.playhead_timeline)} · haz clic en un clip o pulsa reproducir.", fg=TEXT)
+            track = self._track_at_y(y)
+            if track:
+                self.project.selected_track_index = self.project.tracks.index(track)
+                self._refresh_tracks()
             if self.selected_clip:
                 self.cursor_time = clamp_media_time(self.selected_clip.source_in + (self.playhead_timeline - self.selected_clip.timeline_start), self.selected_clip.media.duration)
                 self.time_scale.set(self.cursor_time)
@@ -882,11 +1315,11 @@ class SimpleEditorPanel(tk.Frame):
                 if self.selected_clip.media.has_video:
                     self.request_frame(self.cursor_time)
             return
-        track, clip = self.timeline_items[item]
+        track, clip = hit
         if self.tool_mode == "razor":
             self.selected_clip = clip
             self.selected_media = clip.media
-            self.cursor_time = clamp_media_time(clip.source_in + ((x - 115) / self.zoom - clip.timeline_start), clip.media.duration)
+            self.cursor_time = clamp_media_time(clip.source_in + (self._time_at_x(x) - clip.timeline_start), clip.media.duration)
             self.cut_selected_clip()
             if not self.temporary_razor:
                 self.set_tool("select")
@@ -896,14 +1329,15 @@ class SimpleEditorPanel(tk.Frame):
         self.selected_media = clip.media
         self.mark_in = clip.source_in
         self.mark_out = clip.source_out
-        self.playhead_timeline = max(0.0, (x - 115) / self.zoom)
-        self.cursor_time = clamp_media_time(clip.source_in + (self.playhead_timeline - clip.timeline_start), clip.media.duration)
+        inside = clip.timeline_start <= self.playhead_timeline < clip.timeline_end
+        offset = (self.playhead_timeline - clip.timeline_start) if inside else 0.0
+        self.cursor_time = clamp_media_time(clip.source_in + offset, clip.media.duration)
         self.time_scale.configure(to=max(0.01, clip.media.duration))
         self.time_scale.set(self.cursor_time)
         if clip.media.has_video:
             self.request_frame(self.cursor_time)
         self.resize_side = None
-        x1 = 115 + clip.timeline_start * self.zoom
+        x1 = self._x_at_time(clip.timeline_start)
         x2 = x1 + max(14, clip.duration * self.zoom)
         if abs(x - x1) <= 8:
             self.resize_side = "left"
@@ -912,106 +1346,155 @@ class SimpleEditorPanel(tk.Frame):
         self.drag_clip = clip
         self.drag_track = track
         self.drag_offset = x - x1
-        self.playhead_timeline = max(0.0, (x - 115) / self.zoom)
-        self.status.configure(text=f"Cabezal: {format_editor_time(self.playhead_timeline)}", fg=TEXT)
-        self.timeline_cursor = clip.timeline_start
+        self._pending_snapshot = self._snapshot()
+        self.status.configure(text=f"Clip: {clip.name} · arrastra para mover, bordes para recortar (Alt = sin imán).", fg=TEXT)
         self._update_source_ui()
         self._refresh_tracks()
         self._update_inspector()
         self.redraw_timeline()
 
+    def _replace_linked(self, old_clip, new_clip):
+        track = self._track_of(old_clip)
+        if track:
+            track.clips[track.clips.index(old_clip)] = new_clip
+
+    def _trim_drag(self, track, x, alt):
+        clip = self.drag_clip
+        linked = self._linked_clips(clip)
+        if self.resize_side == "left":
+            boundary = self._snap_edge(clip, self._time_at_x(x), alt)
+            neighbors = [item.timeline_end for item in track.clips if item is not clip and item.timeline_end <= clip.timeline_start + 0.001]
+            if neighbors:
+                boundary = max(boundary, max(neighbors))
+            updated = resize_clip_left(clip, boundary)
+            self._replace_clip(track, clip, updated)
+            for other in linked:
+                self._replace_linked(other, resize_clip_left(other, updated.timeline_start))
+        else:
+            boundary = self._snap_edge(clip, self._time_at_x(x), alt)
+            neighbors = [item.timeline_start for item in track.clips if item is not clip and item.timeline_start >= clip.timeline_end - 0.001]
+            if neighbors:
+                boundary = min(boundary, min(neighbors))
+            updated = resize_clip_right(clip, boundary)
+            self._replace_clip(track, clip, updated)
+            for other in linked:
+                self._replace_linked(other, resize_clip_right(other, updated.timeline_end))
+        if self.snap_target is not None:
+            self.snap_label = f"{self.snap_label}  ·  duración {format_editor_time(self.drag_clip.duration)}"
+
+    def _move_drag(self, track, x, y, alt):
+        clip = self.drag_clip
+        old_start = clip.timeline_start
+        raw_start = self._time_at_x(x - self.drag_offset)
+        new_start = self._snap_start(track, clip, raw_start, alt)
+        target_index = track_index_at(self._layout(), y)
+        if target_index is not None:
+            target_track = self.project.tracks[target_index]
+            if target_track.kind == track.kind and target_track is not track:
+                track.clips.remove(clip)
+                target_track.clips.append(clip)
+                self.drag_track = target_track
+                self.project.selected_track_index = target_index
+                track = target_track
+        free_move = self.magnetic_main.get() and track is self._main_track()
+        if not free_move:
+            neighbor_ranges = [(other.timeline_start, other.timeline_end) for other in track.clips if other is not clip]
+            constrained = avoid_clip_overlap(new_start, clip.duration, neighbor_ranges)
+            if abs(constrained - new_start) > 1e-6:
+                edges = {edge for pair in neighbor_ranges for edge in pair}
+                touching = next((edge for edge in edges if abs(edge - constrained) < 1e-6 or abs(edge - (constrained + clip.duration)) < 1e-6), None)
+                self.snap_target = touching
+                self.snap_label = "Pegado al clip vecino" if touching is not None else ""
+            new_start = constrained
+        delta = new_start - old_start
+        linked = self._linked_clips(clip)
+        for other in linked:
+            other_track = self._track_of(other)
+            ranges = [(item.timeline_start, item.timeline_end) for item in other_track.clips if item is not other and item not in linked]
+            wanted = other.timeline_start + delta
+            if wanted < -1e-6 or abs(avoid_clip_overlap(wanted, other.duration, ranges) - wanted) > 1e-6:
+                self.status.configure(text="El audio vinculado chocaría con otro clip; desvincúlalo para moverlo por separado.", fg=YELLOW)
+                return
+        clip.timeline_start = new_start
+        for other in linked:
+            other.timeline_start = max(0.0, other.timeline_start + delta)
+
     def _timeline_drag(self, event):
+        y = self.timeline.canvasy(event.y)
         if self.resize_track_index is not None:
-            index = self.resize_track_index
-            track = self.project.tracks[index]
-            next_track = self.project.tracks[index + 1]
-            current_y = self.timeline.canvasy(event.y)
-            base = 24 + sum(self.track_heights.get(item.name, 64 if item.kind == "audio" else 48) for item in self.project.tracks[:index])
-            self.track_heights[track.name] = max(34, min(180, current_y - base))
+            track = self.project.tracks[self.resize_track_index]
+            origin_y, origin_height = getattr(self, "_resize_origin", (y, self._row_height(track)))
+            self.track_heights[track.name] = clamp_track_height(origin_height + (y - origin_y))
             self.redraw_timeline()
             return
         if not self.drag_clip:
+            if getattr(self, "scrubbing", False):
+                self._seek_timeline(event)
             return
         x = self.timeline.canvasx(event.x)
-        y = self.timeline.canvasy(event.y)
-        track = next((item for item in self.project.tracks if self.drag_clip in item.clips), None)
+        track = self._track_of(self.drag_clip)
         if not track:
             return
-        if self.resize_side == "left":
-            boundary = (x - 115) / self.zoom
-            neighbors = [item.timeline_end for item in track.clips if item is not self.drag_clip and item.timeline_end <= self.drag_clip.timeline_start + 0.001]
-            if neighbors:
-                boundary = max(boundary, max(neighbors))
-            updated = resize_clip_left(self.drag_clip, boundary)
-            self._replace_clip(track, self.drag_clip, updated)
-        elif self.resize_side == "right":
-            boundary = (x - 115) / self.zoom
-            neighbors = [item.timeline_start for item in track.clips if item is not self.drag_clip and item.timeline_start >= self.drag_clip.timeline_end - 0.001]
-            if neighbors:
-                boundary = min(boundary, min(neighbors))
-            updated = resize_clip_right(self.drag_clip, boundary)
-            self._replace_clip(track, self.drag_clip, updated)
+        alt = self._alt_pressed(event)
+        if self.resize_side in ("left", "right"):
+            self._trim_drag(track, x, alt)
         else:
-            raw_start = max(0.0, (x - self.drag_offset - 115) / self.zoom)
-            alt_override = bool(event.state & 0x0008)
-            new_start = self._snap_start(track, self.drag_clip, raw_start, alt_override)
-            target_row = 0
-            running_y = 24
-            for index, candidate in enumerate(self.project.tracks):
-                height = self.track_heights.get(candidate.name, 64 if candidate.kind == "audio" else 48)
-                if running_y <= y < running_y + height:
-                    target_row = index
-                    break
-                running_y += height
-            target_track = self.project.tracks[target_row] if self.project.tracks else track
-            if target_track.kind == track.kind and target_track is not track:
-                track.clips.remove(self.drag_clip)
-                target_track.clips.append(self.drag_clip)
-                self.drag_track = target_track
-                self.project.selected_track_index = self.project.tracks.index(target_track)
-                track = target_track
-            if not alt_override:
-                neighbor_ranges = [(other.timeline_start, other.timeline_end) for other in track.clips if other is not self.drag_clip]
-                constrained = avoid_clip_overlap(new_start, self.drag_clip.duration, neighbor_ranges)
-                if constrained != new_start:
-                    self.snap_target = constrained if constrained in {edge for pair in neighbor_ranges for edge in pair} else self.snap_target
-                new_start = constrained
-            self.drag_clip.timeline_start = new_start
-            self.timeline_cursor = new_start
+            self._move_drag(track, x, y, alt)
         self._update_inspector()
         self.redraw_timeline()
+
+    def _commit_pending_snapshot(self):
+        snapshot, self._pending_snapshot = self._pending_snapshot, None
+        if snapshot is not None and snapshot != self._snapshot():
+            self._push_undo(snapshot)
 
     def _timeline_release(self, event):
         if self.pending_library_media is not None and self._drop_library_media(event):
             return
+        self.scrubbing = False
         if self.resize_track_index is not None:
             self.resize_track_index = None
+            self._commit_pending_snapshot()
+            self.redraw_timeline()
             return
         if self.drag_clip:
-            self.drag_clip.timeline_start = round(self.drag_clip.timeline_start, 2)
-            self.drag_clip.source_in = round(self.drag_clip.source_in, 3)
-            self.drag_clip.source_out = round(self.drag_clip.source_out, 3)
+            for clip in [self.drag_clip] + self._linked_clips(self.drag_clip):
+                clip.timeline_start = round(clip.timeline_start, 3)
+                clip.source_in = round(clip.source_in, 3)
+                clip.source_out = round(clip.source_out, 3)
+            self._apply_magnetic()
+            self._commit_pending_snapshot()
             self.drag_clip = None
             self.drag_track = None
             self.snap_target = None
+            self.snap_label = ""
             self.resize_side = None
+            self._update_inspector()
             self.redraw_timeline()
 
     def toggle_clip_audio(self):
         if self.selected_clip and self.selected_clip.media.has_audio:
+            self._push_undo()
             self.selected_clip.use_source_audio = not self.selected_clip.use_source_audio
             state = "activado" if self.selected_clip.use_source_audio else "quitado"
             self._update_inspector()
             self.status.configure(text=f"Audio original del clip: {state}.", fg=YELLOW)
 
     def delete_clip(self):
-        for track in self.project.tracks:
-            if self.selected_clip in track.clips:
-                track.clips.remove(self.selected_clip)
-                break
+        clip = self.selected_clip
+        if not clip or not self._track_of(clip):
+            self.status.configure(text="Selecciona un clip para eliminarlo (Supr).", fg=YELLOW)
+            return
+        self._push_undo()
+        for target in [clip] + self._linked_clips(clip):
+            track = self._track_of(target)
+            if track:
+                track.clips.remove(target)
         self.selected_clip = None
+        self._apply_magnetic()
         self._update_inspector()
         self.redraw_timeline()
+        self.status.configure(text="Clip eliminado. Ctrl+Z para deshacer · Shift+Supr borra y cierra el hueco.", fg=GREEN)
 
     def _mode_key(self):
         return "selected" if self.export_mode.get().startswith("Solo") else "active"
@@ -1048,7 +1531,11 @@ class SimpleEditorPanel(tk.Frame):
             except queue.Empty:
                 break
             kind = event[0]
-            if kind == "frame" and event[1] == self.frame_token:
+            if kind == "waveform":
+                self.waveform_cache[event[1]] = event[2]
+                self.waveform_pending.discard(event[1])
+                self.redraw_timeline()
+            elif kind == "frame" and event[1] == self.frame_token:
                 image = Image.open(BytesIO(event[2])).convert("RGB")
                 self.preview_photo = ImageTk.PhotoImage(image)
                 self.preview.configure(image=self.preview_photo, text="")
@@ -1086,5 +1573,5 @@ class SimpleEditorPanel(tk.Frame):
                 self.playhead_timeline = clip.timeline_start + self.cursor_time - clip.source_in
                 self.time_label.configure(text=format_editor_time(self.playhead_timeline))
                 self.redraw_timeline()
-        self.after(60, self._poll_queue)
+        self._poll_after_id = self.after(60, self._poll_queue)
 

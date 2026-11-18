@@ -41,7 +41,11 @@ def set_dark_title_bar(window):
 # --- FFmpeg Discovery ---
 def get_ffmpeg_path():
     """Detecta la ubicación de FFmpeg en ubicaciones comunes o en el PATH de Windows."""
+    app_dir = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
     FFMPEG_LOCATIONS = [
+        os.path.join(app_dir, "ffmpeg", "bin", "ffmpeg.exe"),
+        os.path.join(app_dir, "ffmpeg", "ffmpeg.exe"),
+        os.path.join(app_dir, "ffmpeg.exe"),
         "C:\\ffmpeg_shared4\\ffmpeg-master-latest-win64-gpl-shared\\bin\\ffmpeg.exe",
         "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe",
         "C:\\ffmpeg\\bin\\ffmpeg.exe",

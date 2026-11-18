@@ -1,12 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 a = Analysis(
     ['media_grabber_editor.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets/mediagrabber-icon.png', 'assets')],
-    hiddenimports=['tkinterdnd2', 'tkinterdnd2.TkinterDnD'],
+    datas=[('assets/mediagrabber-icon.png', 'assets')] + collect_data_files('tkinterdnd2'),
+    hiddenimports=['tkinterdnd2', 'tkinterdnd2.TkinterDnD'] + collect_submodules('yt_dlp.extractor'),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -37,4 +38,3 @@ exe = EXE(
     entitlements_file=None,
     icon='assets/mediagrabber.ico',
 )
-
