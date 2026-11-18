@@ -304,6 +304,14 @@ class DownloadCancelledException(Exception):
     pass
 
 # --- Helpers ---
+def is_valid_http_url(url: str) -> bool:
+    try:
+        parsed = urlparse((url or "").strip())
+    except ValueError:
+        return False
+    return parsed.scheme.lower() in ("http", "https") and bool(parsed.netloc)
+
+
 def detect_platform(url: str) -> str:
     url = url.strip().lower()
     if "open.spotify.com" in url or "spotify.link" in url:
@@ -670,6 +678,11 @@ def run_downloads_thread(download_targets, output_dir, fmt, video_quality, inclu
                                 while login_process.poll() is None and not CANCEL_REQUESTED:
                                     time.sleep(0.5)
                                 if CANCEL_REQUESTED:
+                                    if login_process.poll() is None:
+                                        try:
+                                            login_process.terminate()
+                                        except Exception:
+                                            pass
                                     raise DownloadCancelledException("Cancelado por el usuario")
                                 if youtube_profile_has_cookies():
                                     attempts.append('chrome_refreshed')
@@ -807,9 +820,21 @@ def select_playlist_entries(parent, url):
     loading.grid(row=1, column=0, sticky="ew", padx=16, pady=16)
     loading.start(12)
 
+    poll_after_id = {"id": None}
+
     def close(value=None):
         result["value"] = value
-        dialog.destroy()
+        if poll_after_id["id"]:
+            try:
+                dialog.after_cancel(poll_after_id["id"])
+            except (AttributeError, tk.TclError, ValueError):
+                pass
+            poll_after_id["id"] = None
+        try:
+            if dialog.winfo_exists():
+                dialog.destroy()
+        except tk.TclError:
+            pass
 
     def populate(entries):
         loading.stop()
@@ -905,11 +930,20 @@ def select_playlist_entries(parent, url):
         ).pack(side="right", padx=6)
 
     def poll_loader():
+        poll_after_id["id"] = None
+        try:
+            if not dialog.winfo_exists():
+                return
+        except tk.TclError:
+            return
         try:
             status, payload = load_queue.get_nowait()
         except queue.Empty:
-            if dialog.winfo_exists():
-                dialog.after(100, poll_loader)
+            try:
+                if dialog.winfo_exists():
+                    poll_after_id["id"] = dialog.after(100, poll_loader)
+            except tk.TclError:
+                pass
             return
         if status == "error":
             messagebox.showerror(
@@ -938,7 +972,7 @@ def select_playlist_entries(parent, url):
     dialog.protocol("WM_DELETE_WINDOW", lambda: close(None))
     dialog.grab_set()
     threading.Thread(target=loader, daemon=True).start()
-    dialog.after(100, poll_loader)
+    poll_after_id["id"] = dialog.after(100, poll_loader)
     parent.wait_window(dialog)
     return result["value"]
 
@@ -990,6 +1024,12 @@ class MediaGrabberApp:
             if not messagebox.askyesno(
                 "Exportación en curso",
                 "Hay una exportación en curso.\n\n¿Seguro que quieres cerrar la aplicación y cancelar la exportación?",
+            ):
+                return
+        if IS_DOWNLOADING:
+            if not messagebox.askyesno(
+                "Descarga en curso",
+                "Hay una descarga en curso.\n\n¿Seguro que quieres cerrar la aplicación y cancelar la descarga?",
             ):
                 return
         CANCEL_REQUESTED = True
@@ -1364,7 +1404,7 @@ class MediaGrabberApp:
         current_name = self.custom_name_var.get().strip()
         auto_val = getattr(self, "_auto_title_value", None)
         is_auto = bool(auto_val and current_name == auto_val)
-        if len(urls) != 1 or has_playlist_reference(urls[0]) or not urls[0].startswith("http"):
+        if len(urls) != 1 or has_playlist_reference(urls[0]) or not is_valid_http_url(urls[0]):
             self.title_lookup_url = None
             if force or current_name == "Obteniendo título…" or is_auto:
                 self.custom_name_var.set("")
@@ -1450,10 +1490,7 @@ class MediaGrabberApp:
         urls = [u.strip() for u in urls_text.splitlines() if u.strip()]
         
         # Verify URLs
-        invalid_urls = []
-        for u in urls:
-            if not u.startswith("http"):
-                invalid_urls.append(u)
+        invalid_urls = [u for u in urls if not is_valid_http_url(u)]
         
         if invalid_urls:
             messagebox.showerror("Enlaces Inválidos", 

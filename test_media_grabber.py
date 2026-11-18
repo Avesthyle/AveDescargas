@@ -587,6 +587,113 @@ class PlaylistHandlingTests(unittest.TestCase):
             media_grabber.IS_DOWNLOADING = prev_downloading
             media_grabber.CANCEL_REQUESTED = prev_cancel
 
+    def test_url_scheme_validation_login_cancel_cleanup_playlist_close_and_download_exit_confirm(self):
+        import threading
+        import types
+        import tkinter as tk
+        from unittest import mock
+        import media_grabber
+
+        prev_downloading = media_grabber.IS_DOWNLOADING
+        prev_cancel = media_grabber.CANCEL_REQUESTED
+        try:
+            # 1. Validación estricta HTTP/HTTPS insensible a mayúsculas
+            self.assertTrue(media_grabber.is_valid_http_url("HTTPS://youtu.be/abc123"))
+            self.assertTrue(media_grabber.is_valid_http_url("http://example.com/video"))
+            self.assertFalse(media_grabber.is_valid_http_url("httpfoo"))
+            self.assertFalse(media_grabber.is_valid_http_url("https://"))
+            self.assertFalse(media_grabber.is_valid_http_url("ftp://example.com/file"))
+
+            # 2. on_download acepta HTTPS en mayúsculas sin rechazarlo como inválido
+            media_grabber.IS_DOWNLOADING = False
+            media_grabber.CANCEL_REQUESTED = False
+            errors = []
+            resolved_urls = []
+            dummy = types.SimpleNamespace(
+                url_input=types.SimpleNamespace(get=lambda *_a: "HTTPS://example.com/v\n"),
+                clip_enabled_var=types.SimpleNamespace(get=lambda: False),
+                resolve_download_targets=lambda u: (resolved_urls.extend(u), None)[1],
+                lbl_status=types.SimpleNamespace(configure=lambda **_kw: None),
+            )
+            with mock.patch("media_grabber.messagebox.showerror", side_effect=lambda *a: errors.append(a)):
+                media_grabber.MediaGrabberApp.on_download(dummy)
+            self.assertEqual(errors, [])
+            self.assertEqual(resolved_urls, ["HTTPS://example.com/v"])
+
+            # 3. Cancelar mientras Chrome de YouTube está abierto termina login_process
+            terminated = []
+            fake_proc = types.SimpleNamespace(
+                poll=lambda: None,
+                terminate=lambda: terminated.append(True),
+            )
+
+            class AuthYDL:
+                def __init__(self, _opts):
+                    pass
+                def __enter__(self):
+                    return self
+                def __exit__(self, *_a):
+                    return False
+                def extract_info(self, *_a, **_kw):
+                    raise RuntimeError("Sign in to confirm you're not a bot")
+
+            def open_chrome(_url):
+                media_grabber.CANCEL_REQUESTED = True
+                return fake_proc
+
+            with mock.patch("media_grabber.get_ffmpeg_path", return_value="ffmpeg"), \
+                 mock.patch("media_grabber.yt_dlp.YoutubeDL", AuthYDL), \
+                 mock.patch("media_grabber.youtube_profile_has_cookies", return_value=False), \
+                 mock.patch("media_grabber.open_youtube_login_browser", side_effect=open_chrome):
+                media_grabber.run_downloads_thread(
+                    [{"url": "https://www.youtube.com/watch?v=abc"}], "/tmp", "mp4", "1080p (Full HD)"
+                )
+            self.assertEqual(terminated, [True])
+
+            # 4. on_close confirma también cuando IS_DOWNLOADING está activo
+            destroyed = []
+            dummy_close = types.SimpleNamespace(
+                _queue_after_id=None,
+                editor_panel=None,
+                root=types.SimpleNamespace(destroy=lambda: destroyed.append(True)),
+            )
+            media_grabber.IS_DOWNLOADING = True
+            with mock.patch("media_grabber.messagebox.askyesno", return_value=False):
+                media_grabber.MediaGrabberApp.on_close(dummy_close)
+            self.assertEqual(destroyed, [])
+
+            # 5. Cerrar select_playlist_entries antes de recibir payload no muestra errores sobre diálogo destruido
+            root = tk.Tk()
+            root.withdraw()
+            shown_errors = []
+            release_fetch = threading.Event()
+            try:
+                def slow_fetch(_url):
+                    release_fetch.wait(timeout=1.0)
+                    return []
+
+                def close_early():
+                    for win in root.winfo_children():
+                        if isinstance(win, tk.Toplevel):
+                            win.destroy()
+                            return
+                    root.after(20, close_early)
+
+                root.after(30, close_early)
+                with mock.patch("media_grabber.fetch_playlist_entries", side_effect=slow_fetch), \
+                     mock.patch("media_grabber.messagebox.showerror", side_effect=lambda *a, **_k: shown_errors.append(a)):
+                    res = media_grabber.select_playlist_entries(root, "https://example.com/list")
+                    release_fetch.set()
+                    root.update()
+                self.assertIsNone(res)
+                self.assertEqual(shown_errors, [])
+            finally:
+                release_fetch.set()
+                root.destroy()
+        finally:
+            media_grabber.IS_DOWNLOADING = prev_downloading
+            media_grabber.CANCEL_REQUESTED = prev_cancel
+
 
 if __name__ == "__main__":
     unittest.main()
