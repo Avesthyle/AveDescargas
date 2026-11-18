@@ -114,6 +114,16 @@ def build_pitch_filter(semitones: int, sample_rate: int = 44100) -> Optional[str
     )
 
 
+def _finite_nonneg(value: float, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(parsed) or parsed < 0.0:
+        return default
+    return parsed
+
+
 def snap_timeline_position(
     raw_start: float,
     duration: float,
@@ -121,12 +131,17 @@ def snap_timeline_position(
     threshold: float,
 ) -> tuple[float, Optional[float]]:
     """Snap either edge of a moving clip to the nearest candidate."""
-    raw_start = max(0.0, float(raw_start))
-    duration = max(0.0, float(duration))
-    threshold = max(0.0, float(threshold))
+    raw_start = _finite_nonneg(raw_start)
+    duration = _finite_nonneg(duration)
+    threshold = _finite_nonneg(threshold)
     options = []
     for candidate in candidates:
-        target = float(candidate)
+        try:
+            target = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(target):
+            continue
         options.append((abs(raw_start - target), raw_start - target, target))
         options.append((abs(raw_start + duration - target), raw_start + duration - target, target))
     if not options:
@@ -139,8 +154,8 @@ def snap_timeline_position(
 
 def avoid_clip_overlap(raw_start: float, duration: float, ranges: list[tuple[float, float]]) -> float:
     """Choose the nearest position that does not intersect any neighbor range."""
-    start = max(0.0, float(raw_start))
-    length = max(MIN_CLIP_DURATION, float(duration))
+    start = _finite_nonneg(raw_start)
+    length = max(MIN_CLIP_DURATION, _finite_nonneg(duration, MIN_CLIP_DURATION))
 
     def valid(candidate):
         return candidate >= 0 and all(candidate + length <= left + 1e-6 or candidate >= right - 1e-6 for left, right in ranges)
@@ -167,17 +182,26 @@ TRACK_SIZE_PRESETS = {"S": 38.0, "M": 60.0, "L": 110.0}
 
 def snap_threshold(zoom: float, pixels: float = SNAP_PIXELS) -> float:
     """Convierte un radio de enganche en píxeles a segundos según el zoom."""
-    return max(0.02, float(pixels) / max(0.001, float(zoom)))
+    z = _finite_nonneg(zoom, 0.001)
+    p = _finite_nonneg(pixels, SNAP_PIXELS)
+    return max(0.02, p / max(0.001, z))
 
 
 def snap_point(raw: float, candidates: list[float], threshold: float) -> tuple[float, Optional[float]]:
     """Engancha un único punto (p. ej. el borde que se está recortando) al candidato más cercano."""
-    raw = max(0.0, float(raw))
+    raw = _finite_nonneg(raw)
+    threshold = _finite_nonneg(threshold)
     best = None
     for candidate in candidates:
-        distance = abs(raw - float(candidate))
+        try:
+            cand = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(cand):
+            continue
+        distance = abs(raw - cand)
         if distance <= threshold and (best is None or distance < best[0]):
-            best = (distance, float(candidate))
+            best = (distance, cand)
     if best is None:
         return raw, None
     return max(0.0, best[1]), best[1]
@@ -188,7 +212,12 @@ def collect_snap_points(tracks, exclude=(), playhead: Optional[float] = None) ->
     excluded = {id(clip) for clip in exclude}
     points = {0.0}
     if playhead is not None:
-        points.add(round(max(0.0, float(playhead)), 6))
+        try:
+            ph = float(playhead)
+        except (TypeError, ValueError):
+            ph = 0.0
+        if math.isfinite(ph):
+            points.add(round(max(0.0, ph), 6))
     for track in tracks:
         for clip in track.clips:
             if id(clip) in excluded:
@@ -200,7 +229,12 @@ def collect_snap_points(tracks, exclude=(), playhead: Optional[float] = None) ->
 
 def find_gap(clips: list[Clip], time: float) -> Optional[tuple[float, float]]:
     """Devuelve el hueco (inicio, fin) que contiene ``time`` o None si cae dentro de un clip o tras el último."""
-    time = float(time)
+    try:
+        time = float(time)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(time) or time < 0.0:
+        return None
     for clip in clips:
         if clip.timeline_start - 1e-6 <= time < clip.timeline_end - 1e-6:
             return None
@@ -407,9 +441,9 @@ def split_clip(clip: Clip, timeline_time: float) -> Optional[tuple[Clip, Clip]]:
 
 def clamp_fades(fade_in: float, fade_out: float, duration: float) -> tuple[float, float]:
     """Limita fade_in y fade_out a la duración del clip evitando que se solapen."""
-    dur = max(0.0, float(duration))
-    f_in = max(0.0, min(dur, float(fade_in)))
-    f_out = max(0.0, min(dur, float(fade_out)))
+    dur = _finite_nonneg(duration)
+    f_in = min(dur, _finite_nonneg(fade_in))
+    f_out = min(dur, _finite_nonneg(fade_out))
     total = f_in + f_out
     if total > dur > 0:
         scale = dur / total
@@ -541,12 +575,14 @@ def _parse_fps(value: str) -> float:
         if "/" in value:
             numerator, denominator = value.split("/", 1)
             denom = float(denominator)
-            if denom == 0.0:
+            if not math.isfinite(denom) or denom == 0.0:
                 return 0.0
-            return float(numerator) / denom
-        return float(value)
+            fps = float(numerator) / denom
+        else:
+            fps = float(value)
     except (TypeError, ValueError, ZeroDivisionError):
         return 0.0
+    return fps if (math.isfinite(fps) and fps >= 0.0) else 0.0
 
 
 def discover_ffmpeg_tools() -> tuple[str, str, str]:
@@ -573,6 +609,16 @@ def discover_ffmpeg_tools() -> tuple[str, str, str]:
     return ffmpeg, ffprobe, ffplay
 
 
+def _safe_nonneg_int(value) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(0, parsed)
+
+
 def probe_media(path: str) -> MediaInfo:
     _, ffprobe, _ = discover_ffmpeg_tools()
     command = [
@@ -589,8 +635,15 @@ def probe_media(path: str) -> MediaInfo:
         raise ValueError("Tiempo agotado al analizar el archivo.") from exc
     if result.returncode:
         raise ValueError(result.stderr.strip() or "No se pudo analizar el archivo.")
-    data = json.loads(result.stdout)
-    streams = data.get("streams", [])
+    try:
+        data = json.loads(result.stdout)
+    except ValueError as exc:
+        raise ValueError("No se pudo interpretar la información del archivo.") from exc
+    if not isinstance(data, dict):
+        raise ValueError("No se pudo interpretar la información del archivo.")
+    raw_streams = data.get("streams")
+    streams = [s for s in raw_streams if isinstance(s, dict)] if isinstance(raw_streams, list) else []
+    fmt = data.get("format") if isinstance(data.get("format"), dict) else {}
     video = next(
         (
             stream for stream in streams
@@ -601,7 +654,7 @@ def probe_media(path: str) -> MediaInfo:
     )
     audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
     duration_values = [
-        data.get("format", {}).get("duration"),
+        fmt.get("duration"),
         video.get("duration") if video else None,
         audio.get("duration") if audio else None,
     ]
@@ -621,10 +674,10 @@ def probe_media(path: str) -> MediaInfo:
         duration=duration,
         has_video=video is not None,
         has_audio=audio is not None,
-        width=int(video.get("width") or 0) if video else 0,
-        height=int(video.get("height") or 0) if video else 0,
+        width=_safe_nonneg_int(video.get("width")) if video else 0,
+        height=_safe_nonneg_int(video.get("height")) if video else 0,
         fps=_parse_fps(video.get("avg_frame_rate") or video.get("r_frame_rate") or "0") if video else 0.0,
-        format_name=str(data.get("format", {}).get("format_name") or ""),
+        format_name=str(fmt.get("format_name") or ""),
         video_codec=video.get("codec_name") if video else None,
         audio_codec=audio.get("codec_name") if audio else None,
     )

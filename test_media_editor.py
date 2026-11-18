@@ -535,6 +535,38 @@ class ExportPlanTests(unittest.TestCase):
         self.assertIs(clips[1], c3)
         self.assertAlmostEqual(c3.timeline_start, 1.0)
 
+    def test_probe_media_handles_null_json_and_nonfinite_helpers(self):
+        from unittest import mock
+        from media_editor import (
+            avoid_clip_overlap,
+            clamp_fades,
+            collect_snap_points,
+            find_gap,
+            probe_media,
+            snap_point,
+            snap_threshold,
+            snap_timeline_position,
+        )
+
+        payload = '{"streams": [{"codec_type": "video", "duration": "4.0", "width": "bad", "height": 360, "avg_frame_rate": "inf"}], "format": null}'
+        with mock.patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             mock.patch("media_editor.subprocess.run", return_value=mock.Mock(returncode=0, stdout=payload)):
+            info = probe_media("x.mp4")
+        self.assertEqual((info.width, info.height, info.fps), (0, 360, 0.0))
+
+        with mock.patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             mock.patch("media_editor.subprocess.run", return_value=mock.Mock(returncode=0, stdout='{"streams": null, "format": null}')):
+            with self.assertRaises(ValueError):
+                probe_media("empty.mp4")
+
+        self.assertEqual(clamp_fades(float("nan"), 1.0, 4.0), (0.0, 1.0))
+        self.assertEqual(avoid_clip_overlap(float("nan"), 2.0, []), 0.0)
+        self.assertEqual(collect_snap_points([], playhead=float("nan")), [0.0])
+        self.assertEqual(snap_timeline_position(float("nan"), 2.0, [1.0, float("nan")], 0.5), (0.0, None))
+        self.assertEqual(snap_point(float("nan"), [1.0, float("nan")], 0.5), (0.0, None))
+        self.assertGreater(snap_threshold(float("nan")), 0.0)
+        self.assertIsNone(find_gap([], float("nan")))
+
 
 if __name__ == "__main__":
     unittest.main()
