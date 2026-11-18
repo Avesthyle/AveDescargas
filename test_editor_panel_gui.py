@@ -689,6 +689,82 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_razor_cut_ignores_outer_snap_updates_playhead_and_inspector(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            v_track = panel.project.tracks[0]
+            v_media = MediaInfo(path="v.mp4", duration=10.0, has_video=True, has_audio=False, width=320, height=180, fps=30.0)
+            clip = Clip(v_media, source_in=0.0, source_out=4.0, timeline_start=0.0, fade_in=1.5)
+            v_track.clips = [clip]
+            panel.selected_clip = clip
+            panel.selected_media = v_media
+            panel.zoom = 10.0  # snap_threshold grande (~1.2s) que antes enganchaba 0.25s al borde 0.0
+            panel.snap_enabled.set(True)
+            panel.cursor_time = 0.25
+            panel.cut_selected_clip()
+            self.assertEqual(len(v_track.clips), 2)
+            self.assertAlmostEqual(panel.playhead_timeline, 0.25, places=5)
+            self.assertAlmostEqual(float(panel.fade_in_var.get()), 0.25, places=2)
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
+    def test_linked_audio_trim_and_move_respect_magnetic_main(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            v_track, a_track = panel.project.tracks
+            v_media = MediaInfo(path="av.mp4", duration=10.0, has_video=True, has_audio=True, width=320, height=180, fps=30.0)
+            a_media = audio_media_from_video(v_media)
+            c1 = Clip(v_media, source_out=3.0, timeline_start=0.0, use_source_audio=False, link_group="g1")
+            c2 = Clip(v_media, source_out=3.0, timeline_start=3.0, use_source_audio=False, link_group="g2")
+            a1 = Clip(a_media, source_out=3.0, timeline_start=0.0, link_group="g1")
+            a2 = Clip(a_media, source_out=3.0, timeline_start=3.0, link_group="g2")
+            v_track.clips = [c1, c2]
+            a_track.clips = [a1, a2]
+            panel.magnetic_main.set(True)
+            panel.drag_clip = a1
+            panel.resize_side = "right"
+            panel._trim_drag(a_track, panel._x_at_time(5.0), alt=True)
+            self.assertAlmostEqual(a_track.clips[0].timeline_end, 5.0, places=3)
+            self.assertAlmostEqual(v_track.clips[1].timeline_start, 5.0, places=3)
+            panel.resize_side = None
+            panel.drag_clip = a_track.clips[0]
+            panel.drag_offset = 0.0
+            panel._move_drag(a_track, panel._x_at_time(6.0), panel._layout()[1][0] + 10, alt=True)
+            self.assertGreater(v_track.clips[0].timeline_start, 4.5)
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
+    def test_toggle_play_rejects_missing_file_and_redraw_handles_muted_fades(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            v_media = MediaInfo(path="/no/existe/video.mp4", duration=5.0, has_video=True, has_audio=True, width=320, height=180, fps=30.0)
+            clip = Clip(v_media, source_out=5.0, timeline_start=0.0, use_source_audio=False, fade_in=0.5, fade_out=0.5)
+            panel.project.tracks[0].clips.append(clip)
+            panel.project.tracks[0].muted = True
+            panel.selected_clip = clip
+            panel.selected_media = v_media
+            panel.redraw_timeline()
+            panel.toggle_play()
+            self.assertFalse(panel.playing)
+            self.assertIn("no encontrado", panel.status.cget("text").lower())
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

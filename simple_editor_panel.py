@@ -12,12 +12,14 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+import weakref
 
 from PIL import Image, ImageTk
 
 from media_editor import (
     Clip,
     EditorProject,
+    MIN_CLIP_DURATION,
     Track,
     build_export_plan,
     clamp_media_time,
@@ -1392,6 +1394,10 @@ class SimpleEditorPanel(tk.Frame):
         media = self.selected_media
         if not media:
             return
+        if not os.path.isfile(media.path):
+            self._playback_from_timeline = False
+            self.status.configure(text=f"Archivo no encontrado: {os.path.basename(media.path)}", fg=RED)
+            return
         start, end = playback_range(self.cursor_time, self.mark_in, self.mark_out, media.duration, from_mark=from_mark)
         self.cursor_time = start
         self.playback_started_at = None
@@ -1426,13 +1432,29 @@ class SimpleEditorPanel(tk.Frame):
             f"pad={self.PREVIEW_WIDTH}:{self.PREVIEW_HEIGHT}:(ow-iw)/2:(oh-ih)/2",
         ]
         vf_parts.extend(self._preview_fade_filters(clip_ref, start, duration, is_audio=False))
+        audio_fade_filters = self._preview_fade_filters(audio_clip, start, duration, is_audio=True)
 
-        def worker():
+        def worker(
+            panel_ref=weakref.ref(self),
+            ui_q=self.ui_queue,
+            media_path=media.path,
+            preview_w=self.PREVIEW_WIDTH,
+            preview_h=self.PREVIEW_HEIGHT,
+            start=start,
+            duration=duration,
+            vf_parts=list(vf_parts),
+            play_audio=play_audio,
+            audio_path=audio_path,
+            pitch_filter=pitch_filter,
+            volume=volume,
+            audio_fade_filters=list(audio_fade_filters),
+            token=token,
+        ):
             v_proc = None
             try:
                 ffmpeg, _, ffplay = discover_ffmpeg_tools()
                 command = [
-                    ffmpeg, "-v", "error", "-ss", f"{start:.3f}", "-i", media.path,
+                    ffmpeg, "-v", "error", "-ss", f"{start:.3f}", "-i", media_path,
                     "-t", f"{duration:.3f}", "-an", "-vf", ",".join(vf_parts),
                     "-r", "15", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
                 ]
@@ -1440,7 +1462,10 @@ class SimpleEditorPanel(tk.Frame):
                     command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
-                self.video_process = v_proc
+                p = panel_ref()
+                if p is not None:
+                    p.video_process = v_proc
+                p = None
                 if play_audio:
                     audio_command = [ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}"]
                     af_parts = []
@@ -1448,18 +1473,27 @@ class SimpleEditorPanel(tk.Frame):
                         af_parts.append(pitch_filter)
                     if abs(volume - 1.0) > 1e-4:
                         af_parts.append(f"volume={volume:.3f}")
-                    af_parts.extend(self._preview_fade_filters(audio_clip, start, duration, is_audio=True))
+                    af_parts.extend(audio_fade_filters)
                     if af_parts:
                         audio_command += ["-af", ",".join(af_parts)]
                     audio_command += [audio_path]
-                    self.audio_process = subprocess.Popen(
+                    a_proc = subprocess.Popen(
                         audio_command,
                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     )
-                frame_size = self.PREVIEW_WIDTH * self.PREVIEW_HEIGHT * 3
+                    p = panel_ref()
+                    if p is not None:
+                        p.audio_process = a_proc
+                    p = None
+                frame_size = preview_w * preview_h * 3
                 frame_index = 0
                 began = time.monotonic()
-                while v_proc.poll() is None and token == self.frame_token:
+                while v_proc.poll() is None:
+                    p = panel_ref()
+                    if p is None or token != p.frame_token:
+                        p = None
+                        break
+                    p = None
                     raw = v_proc.stdout.read(frame_size) if v_proc.stdout else b""
                     if len(raw) != frame_size:
                         break
@@ -1467,15 +1501,19 @@ class SimpleEditorPanel(tk.Frame):
                     wait = target - (time.monotonic() - began)
                     if wait > 0:
                         time.sleep(wait)
-                    self.ui_queue.put(("raw_frame", token, raw, start + target))
+                    ui_q.put(("raw_frame", token, raw, start + target))
                     frame_index += 1
                 code = v_proc.wait()
-                if token == self.frame_token and code not in (0, None):
+                p = panel_ref()
+                if p is not None and token == p.frame_token and code not in (0, None):
                     error = v_proc.stderr.read().decode("utf-8", "replace").strip() if v_proc.stderr else ""
-                    self.ui_queue.put(("play_error", error or "FFmpeg no pudo generar la previsualización."))
+                    ui_q.put(("play_error", error or "FFmpeg no pudo generar la previsualización."))
+                p = None
             except Exception as exc:
-                if token == self.frame_token:
-                    self.ui_queue.put(("play_error", str(exc)))
+                p = panel_ref()
+                if p is not None and token == p.frame_token:
+                    ui_q.put(("play_error", str(exc)))
+                p = None
             finally:
                 for stream in (getattr(v_proc, "stdout", None), getattr(v_proc, "stderr", None)):
                     if stream:
@@ -1483,11 +1521,17 @@ class SimpleEditorPanel(tk.Frame):
                             stream.close()
                         except Exception:
                             pass
-                self.ui_queue.put(("play_done", token))
+                ui_q.put(("play_done", token))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _play_audio_only(self, media, start=None, end=None):
+        if not os.path.isfile(media.path):
+            self.playing = False
+            self._playback_from_timeline = False
+            self.play_btn.configure(text="▶")
+            self.status.configure(text=f"Archivo no encontrado: {os.path.basename(media.path)}", fg=RED)
+            return
         try:
             _, _, ffplay = discover_ffmpeg_tools()
         except Exception as exc:
@@ -1523,11 +1567,13 @@ class SimpleEditorPanel(tk.Frame):
         )
         self.audio_process = audio_process
 
-        def wait_audio():
-            code = audio_process.wait()
-            if token == self.frame_token and code not in (0, None):
-                self.ui_queue.put(("audio_error", "No se pudo reproducir el audio con FFplay."))
-            self.ui_queue.put(("play_done", token))
+        def wait_audio(panel_ref=weakref.ref(self), ui_q=self.ui_queue, proc=audio_process, token=token):
+            code = proc.wait()
+            p = panel_ref()
+            if p is not None and token == p.frame_token and code not in (0, None):
+                ui_q.put(("audio_error", "No se pudo reproducir el audio con FFplay."))
+            p = None
+            ui_q.put(("play_done", token))
         threading.Thread(target=wait_audio, daemon=True).start()
 
     def stop_playback(self):
@@ -1558,7 +1604,11 @@ class SimpleEditorPanel(tk.Frame):
             return
         timeline_cut = clip.timeline_start + (self.cursor_time - clip.source_in)
         if self.snap_enabled.get():
-            timeline_cut, _target = snap_point(timeline_cut, self._snap_points_for(clip), snap_threshold(self.zoom))
+            inner_candidates = [
+                pt for pt in self._snap_points_for(clip)
+                if clip.timeline_start + MIN_CLIP_DURATION < pt < clip.timeline_end - MIN_CLIP_DURATION
+            ]
+            timeline_cut, _target = snap_point(timeline_cut, inner_candidates, snap_threshold(self.zoom))
         pieces = split_clip(clip, timeline_cut)
         if pieces is None:
             self.status.configure(text="La cuchilla debe estar dentro del clip, no en sus extremos.", fg=YELLOW)
@@ -1578,6 +1628,7 @@ class SimpleEditorPanel(tk.Frame):
                 index = track.clips.index(clip)
                 track.clips[index:index + 1] = list(pieces)
                 self.selected_clip = pieces[0]
+                self.playhead_timeline = timeline_cut
                 self._sync_selection_marks(self.selected_clip)
                 self.project.selected_track_index = self.project.tracks.index(track)
                 self._refresh_tracks()
@@ -1654,11 +1705,17 @@ class SimpleEditorPanel(tk.Frame):
             for clip in track.clips:
                 x1 = self._x_at_time(clip.timeline_start)
                 x2 = x1 + max(14, clip.duration * self.zoom)
-                color = "#126da8" if track.kind == "video" else "#28784a"
+                muted_or_off = (not track.enabled) or track.muted
+                if track.kind == "video":
+                    color = "#2c3e4d" if muted_or_off else "#126da8"
+                else:
+                    color = "#2d4236" if muted_or_off else "#28784a"
                 selected = clip is self.selected_clip
                 outline = YELLOW if selected else "#78a9c8"
                 item = self.timeline.create_rectangle(x1, y1 + 4, x2, inner_bottom - 3, fill=color, outline=outline, width=2 if selected else 1)
                 self.timeline_items[item] = (track, clip)
+                has_linked_audio = self._linked_audio_source(clip) is not None
+                clip_audible = track.enabled and not track.muted and (clip.use_source_audio or has_linked_audio)
                 if clip.media.has_audio:
                     samples = self.waveform_cache.get(clip.media.path)
                     if samples is None:
@@ -1668,11 +1725,20 @@ class SimpleEditorPanel(tk.Frame):
                         segment = waveform_segment(samples, clip.source_in, clip.source_out, clip.media.duration, count)
                         mid = (y1 + inner_bottom) / 2 + (6 if track.kind == "video" else 0)
                         height = max(4, (inner_bottom - y1 - 12) / 2) if track.kind == "audio" else max(3, (inner_bottom - y1 - 16) / 3)
+                        wave_color = "#c3f3d0" if clip_audible else "#65756b"
                         for index, peak in enumerate(segment):
                             px = x1 + (index / max(1, len(segment) - 1)) * max(4, x2 - x1)
-                            self.timeline.create_line(px, mid - peak * height, px, mid + peak * height, fill="#c3f3d0", width=2)
-                name = ("🔗 " if clip.link_group else "") + clip.name
-                self.timeline.create_text(x1 + 6, y1 + 7, text=name, fill="#ffffff", anchor="nw", font=("Segoe UI", 8))
+                            self.timeline.create_line(px, mid - peak * height, px, mid + peak * height, fill=wave_color, width=2)
+                if clip.fade_in > 0:
+                    fx_in = min(x2, x1 + clip.fade_in * self.zoom)
+                    self.timeline.create_line(x1, inner_bottom - 3, fx_in, y1 + 4, fill="#ffd166", width=2)
+                if clip.fade_out > 0:
+                    fx_out = max(x1, x2 - clip.fade_out * self.zoom)
+                    self.timeline.create_line(fx_out, y1 + 4, x2, inner_bottom - 3, fill="#ffd166", width=2)
+                muted_badge = "🔇 " if (clip.media.has_audio and (track.muted or (not clip.use_source_audio and not has_linked_audio))) else ""
+                name = muted_badge + ("🔗 " if clip.link_group else "") + clip.name
+                text_color = "#b8c0c4" if muted_or_off else "#ffffff"
+                self.timeline.create_text(x1 + 6, y1 + 7, text=name, fill=text_color, anchor="nw", font=("Segoe UI", 8))
                 if selected:
                     left_handle = self.timeline.create_rectangle(x1, y1 + 2, x1 + 6, inner_bottom - 1, fill=YELLOW, outline="")
                     right_handle = self.timeline.create_rectangle(x2 - 6, y1 + 2, x2, inner_bottom - 1, fill=YELLOW, outline="")
@@ -1820,7 +1886,10 @@ class SimpleEditorPanel(tk.Frame):
     def _trim_drag(self, track, x, alt):
         clip = self.drag_clip
         linked = self._linked_clips(clip)
-        is_magnetic_main = self.magnetic_main.get() and track is self._main_track()
+        main_track = self._main_track()
+        is_magnetic_main = self.magnetic_main.get() and (
+            track is main_track or any(self._track_of(o) is main_track for o in linked)
+        )
         if self.resize_side == "left":
             boundary = self._snap_edge(clip, self._time_at_x(x), alt)
             neighbors = [item.timeline_end for item in track.clips if item is not clip and item.timeline_end <= clip.timeline_start + 0.001]
@@ -1865,7 +1934,12 @@ class SimpleEditorPanel(tk.Frame):
             candidate = self.project.tracks[target_index]
             if candidate.kind == track.kind and candidate is not track:
                 target_track = candidate
-        free_move = self.magnetic_main.get() and target_track is self._main_track()
+        linked = self._linked_clips(clip)
+        main_track = self._main_track()
+        free_move = self.magnetic_main.get() and (
+            target_track is main_track
+            or (target_track is track and any(self._track_of(o) is main_track for o in linked))
+        )
         if not free_move:
             neighbor_ranges = [(other.timeline_start, other.timeline_end) for other in target_track.clips if other is not clip]
             constrained = avoid_clip_overlap(new_start, clip.duration, neighbor_ranges)
@@ -1876,8 +1950,7 @@ class SimpleEditorPanel(tk.Frame):
                 self.snap_label = "Pegado al clip vecino" if touching is not None else ""
             new_start = constrained
         delta = new_start - old_start
-        linked = self._linked_clips(clip)
-        main_groups = {c.link_group for c in self._main_track().clips if c.link_group} if free_move and self._main_track() else set()
+        main_groups = {c.link_group for c in main_track.clips if c.link_group} if free_move and main_track else set()
         for other in linked:
             other_track = self._track_of(other)
             if not other_track:
@@ -2029,12 +2102,12 @@ class SimpleEditorPanel(tk.Frame):
         self.export_duration = max(0.01, plan.get("duration", 0.0))
         self.status.configure(text="Exportando… 0%", fg=YELLOW)
 
-        def worker():
+        def worker(plan=plan, ui_q=self.ui_queue):
             try:
-                output = run_export(plan, lambda line: self.ui_queue.put(("progress", line)))
-                self.ui_queue.put(("export_done", output))
+                output = run_export(plan, lambda line: ui_q.put(("progress", line)))
+                ui_q.put(("export_done", output))
             except Exception as exc:
-                self.ui_queue.put(("error", str(exc)))
+                ui_q.put(("error", str(exc)))
         threading.Thread(target=worker, daemon=True).start()
 
     def _poll_queue(self):

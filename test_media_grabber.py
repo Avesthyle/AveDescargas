@@ -322,6 +322,41 @@ class PlaylistHandlingTests(unittest.TestCase):
             for name in remove:
                 self.assertFalse(os.path.exists(os.path.join(folder, name)), name)
 
+    def test_load_title_async_preserves_custom_name(self):
+        import types
+        import media_grabber
+
+        class DummyVar:
+            def __init__(self, value=""):
+                self.value = value
+            def get(self):
+                return self.value
+            def set(self, value):
+                self.value = value
+
+        class DummyText:
+            def __init__(self, content):
+                self.content = content
+            def get(self, *_args):
+                return self.content
+
+        url = "https://www.youtube.com/watch?v=abc123"
+        dummy = types.SimpleNamespace(
+            url_input=DummyText(url),
+            custom_name_var=DummyVar("Mi nombre propio"),
+            title_lookup_url=None,
+            root=types.SimpleNamespace(after=lambda *_a: None),
+            check_queue=lambda: None,
+        )
+        media_grabber.MediaGrabberApp.load_title_async(dummy)
+        self.assertEqual(dummy.custom_name_var.get(), "Mi nombre propio")
+
+        # Si el usuario escribe su propio nombre mientras yt-dlp consulta, check_queue no lo borra
+        dummy.title_lookup_url = url
+        media_grabber.ui_queue.put({"type": "detected_title", "url": url, "title": "Titulo Youtube"})
+        media_grabber.MediaGrabberApp.check_queue(dummy)
+        self.assertEqual(dummy.custom_name_var.get(), "Mi nombre propio")
+
 
 if __name__ == "__main__":
     unittest.main()

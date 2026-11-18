@@ -1296,12 +1296,17 @@ class MediaGrabberApp:
 
     def load_title_async(self):
         urls = [u.strip() for u in self.url_input.get("1.0", tk.END).splitlines() if u.strip()]
+        current_name = self.custom_name_var.get().strip()
         if len(urls) != 1 or has_playlist_reference(urls[0]) or not urls[0].startswith("http"):
             self.title_lookup_url = None
-            self.custom_name_var.set("")
+            if current_name == "Obteniendo título…":
+                self.custom_name_var.set("")
             return
         url = urls[0]
-        if url == self.title_lookup_url and self.custom_name_var.get().strip():
+        if url == self.title_lookup_url and current_name:
+            return
+        if current_name and current_name != "Obteniendo título…":
+            self.title_lookup_url = url
             return
         self.title_lookup_url = url
         self.custom_name_var.set("Obteniendo título…")
@@ -1490,7 +1495,8 @@ class MediaGrabberApp:
 
             elif m_type == 'detected_title':
                 if msg.get('url') == self.title_lookup_url:
-                    self.custom_name_var.set(msg.get('title') or "")
+                    if self.custom_name_var.get().strip() in ("", "Obteniendo título…"):
+                        self.custom_name_var.set(msg.get('title') or "")
 
             elif m_type == 'youtube_login_opened':
                 messagebox.showinfo(
