@@ -322,9 +322,14 @@ class Clip:
         self.source_out = self.media.duration if self.source_out is None else parse_editor_time(self.source_out)
         self.timeline_start = parse_editor_time(self.timeline_start)
         self.pitch_semitones = int(self.pitch_semitones)
-        self.volume = max(0.0, min(2.0, float(self.volume)))
-        self.fade_in = max(0.0, float(self.fade_in))
-        self.fade_out = max(0.0, float(self.fade_out))
+        vol = float(self.volume)
+        f_in = float(self.fade_in)
+        f_out = float(self.fade_out)
+        if not (math.isfinite(vol) and math.isfinite(f_in) and math.isfinite(f_out)):
+            raise ValueError("Volumen y fundidos deben ser números válidos.")
+        self.volume = max(0.0, min(2.0, vol))
+        self.fade_in = max(0.0, f_in)
+        self.fade_out = max(0.0, f_out)
         pitch_factor(self.pitch_semitones)
         if self.source_out <= self.source_in:
             raise ValueError("La salida debe ser posterior a la entrada.")
@@ -555,10 +560,14 @@ def probe_media(path: str) -> MediaInfo:
         ffprobe, "-v", "error", "-show_streams", "-show_format",
         "-of", "json", os.fspath(path),
     ]
-    result = subprocess.run(
-        command, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Tiempo agotado al analizar el archivo.") from exc
     if result.returncode:
         raise ValueError(result.stderr.strip() or "No se pudo analizar el archivo.")
     data = json.loads(result.stdout)
@@ -683,7 +692,7 @@ def build_export_plan(
                     "setpts=PTS-STARTPTS",
                     f"fps={_number(fps)}",
                 ]
-                if alpha_fade:
+                if is_upper_overlay:
                     v_filters.append("format=yuva420p")
                 if d_in > 0:
                     suffix = ":alpha=1" if alpha_fade else ""
@@ -692,7 +701,7 @@ def build_export_plan(
                     st_out = max(0.0, clip.duration - d_out)
                     suffix = ":alpha=1" if alpha_fade else ""
                     v_filters.append(f"fade=t=out:st={_number(st_out)}:d={_number(d_out)}{suffix}")
-                pad_color = ":color=black@0" if alpha_fade else ""
+                pad_color = ":color=black@0" if is_upper_overlay else ""
                 v_filters.extend([
                     f"setpts=PTS+{_number(clip.timeline_start)}/TB",
                     f"scale={width}:{height}:force_original_aspect_ratio=decrease",
@@ -953,7 +962,7 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
                     audio_codec=m.get("audio_codec"),
                 )
             )
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
             raise ValueError("El archivo de proyecto contiene metadatos de medio dañados.") from exc
     tracks = []
     for t in raw_tracks:
@@ -970,7 +979,7 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
                 if isinstance(c["media_idx"], bool):
                     raise ValueError("media_idx booleano")
                 media_idx = int(c["media_idx"])
-            except (KeyError, TypeError, ValueError) as exc:
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
                 raise ValueError("El archivo de proyecto tiene un índice de archivo inválido.") from exc
             if not 0 <= media_idx < len(media_list):
                 raise ValueError(f"Índice de archivo inválido en proyecto: {media_idx}")
@@ -997,7 +1006,7 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
                     fade_in=f_in,
                     fade_out=f_out,
                 ))
-            except (KeyError, TypeError, ValueError) as exc:
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
                 raise ValueError("El archivo de proyecto contiene un clip dañado.") from exc
         try:
             tracks.append(Track(
@@ -1011,7 +1020,7 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
             raise ValueError("El archivo de proyecto contiene una pista dañada.") from exc
     try:
         raw_sel = int(data.get("selected_track_index") or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raw_sel = 0
     sel_idx = max(0, min(len(tracks) - 1, raw_sel)) if tracks else 0
     project = EditorProject(tracks=tracks, selected_track_index=sel_idx)

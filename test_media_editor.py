@@ -439,6 +439,38 @@ class ExportPlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             project_from_dict({"media": [{"path": "x.mp4", "duration": float("nan"), "has_video": True, "has_audio": False}], "tracks": []})
 
+    def test_upper_overlay_transparent_pad_without_fades_clip_finite_probe_timeout_and_overflow(self):
+        import subprocess
+        from media_editor import probe_media, project_from_dict
+
+        # 1. Capa superior sin fade también usa yuva420p y color=black@0 para no tapar la pista inferior
+        top = Track("Superior", "video", clips=[Clip(video_info("top.mp4"), source_out=4)])
+        bottom = Track("Inferior", "video", clips=[Clip(video_info("bottom.mp4"), source_out=4)])
+        plan = build_export_plan(EditorProject([top, bottom]), "active", None, "salida.mp4")
+        self.assertIn("format=yuva420p", plan["filter_complex"])
+        self.assertIn(":color=black@0", plan["filter_complex"])
+
+        # 2. Clip rechaza volume/fade_in/fade_out no finitos
+        with self.assertRaises(ValueError):
+            Clip(video_info("v.mp4"), source_out=2.0, volume=float("nan"))
+        with self.assertRaises(ValueError):
+            Clip(video_info("v.mp4"), source_out=2.0, fade_in=float("inf"))
+
+        # 3. probe_media captura TimeoutExpired con ValueError
+        with patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             patch("media_editor.subprocess.run", side_effect=subprocess.TimeoutExpired("ffprobe", 30)):
+            with self.assertRaisesRegex(ValueError, "agotado"):
+                probe_media("hang.mp4")
+
+        # 4. project_from_dict controla OverflowError por float('nan')/'inf' en campos enteros
+        with self.assertRaises(ValueError):
+            project_from_dict({
+                "media": [{"path": "a.mp4", "duration": 5.0, "has_video": True, "has_audio": False}],
+                "tracks": [{"name": "V1", "kind": "video", "clips": [{"media_idx": 0, "source_in": 0, "source_out": 2, "timeline_start": 0, "pitch_semitones": float("inf")}]}],
+            })
+        proj, _, _ = project_from_dict({"media": [], "tracks": [], "selected_track_index": float("nan")})
+        self.assertEqual(proj.selected_track_index, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
