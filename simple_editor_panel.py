@@ -458,9 +458,12 @@ class SimpleEditorPanel(tk.Frame):
         self.track_heights = heights
         self.selected_clip = None
         self.drag_clip = None
+        self.drag_track = None
+        self.resize_side = None
         self.resize_track_index = None
         self.snap_target = None
         self.snap_label = ""
+        self._pending_snapshot = None
         total = self.project.duration()
         if self.playhead_timeline > total:
             self.playhead_timeline = total
@@ -1398,6 +1401,9 @@ class SimpleEditorPanel(tk.Frame):
         self.redraw_timeline()
         if media.has_video and os.path.isfile(media.path):
             self.request_frame(clip.source_in)
+        elif not media.has_video:
+            self.preview_photo = None
+            self.preview.configure(image="", text=f"♫  {pathlib.Path(media.path).name}")
         self.status.configure(text=f"Añadido al timeline: {pathlib.Path(media.path).name}", fg=GREEN)
 
     def remove_selected_library_media(self):
@@ -2264,6 +2270,9 @@ class SimpleEditorPanel(tk.Frame):
         self.cursor_time = clamp_media_time(clip.source_in + offset, clip.media.duration)
         if clip.media.has_video:
             self.request_frame(self.cursor_time)
+        else:
+            self.preview_photo = None
+            self.preview.configure(image="", text=f"♫  {pathlib.Path(clip.media.path).name}")
         self.resize_side = None
         x1 = self._x_at_time(clip.timeline_start)
         x2 = x1 + max(14, clip.duration * self.zoom)
@@ -2464,6 +2473,7 @@ class SimpleEditorPanel(tk.Frame):
             self.snap_target = None
             self.snap_label = ""
             self.resize_side = None
+            self._refresh_tracks()
             self._update_inspector()
             self.redraw_timeline()
 
@@ -2596,78 +2606,93 @@ class SimpleEditorPanel(tk.Frame):
             except (tk.TclError, ValueError):
                 pass
             self._poll_after_id = None
-        while not getattr(self, "_destroyed", False):
-            try:
-                event = self.ui_queue.get_nowait()
-            except queue.Empty:
-                break
-            kind = event[0]
-            if kind == "waveform":
-                self.waveform_cache[event[1]] = event[2]
-                self.waveform_pending.discard(event[1])
-                self.redraw_timeline()
-            elif kind == "frame" and event[1] == self.frame_token:
-                image = Image.open(BytesIO(event[2])).convert("RGB")
-                self.preview_photo = ImageTk.PhotoImage(image)
-                self.preview.configure(image=self.preview_photo, text="")
-            elif kind == "raw_frame" and event[1] == self.frame_token:
-                image = Image.frombytes("RGB", (self.PREVIEW_WIDTH, self.PREVIEW_HEIGHT), event[2])
-                self.preview_photo = ImageTk.PhotoImage(image)
-                self.preview.configure(image=self.preview_photo, text="")
-                self.cursor_time = event[3]
+        try:
+            while not getattr(self, "_destroyed", False):
+                try:
+                    event = self.ui_queue.get_nowait()
+                except queue.Empty:
+                    break
+                kind = event[0]
+                if kind == "waveform":
+                    self.waveform_cache[event[1]] = event[2]
+                    self.waveform_pending.discard(event[1])
+                    self.redraw_timeline()
+                elif kind == "frame" and event[1] == self.frame_token:
+                    try:
+                        image = Image.open(BytesIO(event[2])).convert("RGB")
+                    except (OSError, ValueError):
+                        continue
+                    self.preview_photo = ImageTk.PhotoImage(image)
+                    self.preview.configure(image=self.preview_photo, text="")
+                elif kind == "raw_frame" and event[1] == self.frame_token:
+                    expected = self.PREVIEW_WIDTH * self.PREVIEW_HEIGHT * 3
+                    if len(event[2]) != expected:
+                        continue
+                    try:
+                        image = Image.frombytes("RGB", (self.PREVIEW_WIDTH, self.PREVIEW_HEIGHT), event[2])
+                    except ValueError:
+                        continue
+                    self.preview_photo = ImageTk.PhotoImage(image)
+                    self.preview.configure(image=self.preview_photo, text="")
+                    self.cursor_time = event[3]
+                    clip = self.selected_clip
+                    if clip and clip.media is self.selected_media:
+                        self.playhead_timeline = clip.timeline_start + self.cursor_time - clip.source_in
+                        self._update_timecode()
+                        self.redraw_timeline()
+                        self._ensure_playhead_visible()
+                elif kind == "play_done" and event[1] == self.frame_token:
+                    was_timeline = self._playback_from_timeline
+                    prev_clip = self.selected_clip
+                    self._terminate_processes()
+                    self.playing = False
+                    self.playback_started_at = None
+                    self.play_btn.configure(text="▶")
+                    if was_timeline and prev_clip is not None:
+                        next_pos = prev_clip.timeline_end + 0.001
+                        _nt, next_clip = self._next_clip_after(next_pos)
+                        if next_clip and next_clip is not prev_clip and next_clip.timeline_end > next_pos:
+                            self.playhead_timeline = max(prev_clip.timeline_end, next_clip.timeline_start)
+                            self.play_from_cursor()
+                        else:
+                            self._playback_from_timeline = False
+                    else:
+                        self._playback_from_timeline = False
+                elif kind == "play_error":
+                    self.status.configure(text=f"Previsualización: {event[1]}", fg=RED)
+                elif kind == "audio_error":
+                    self.status.configure(text=event[1], fg=RED)
+                elif kind == "progress":
+                    secs = parse_ffmpeg_time(event[1])
+                    if secs is not None and self.export_duration > 0:
+                        pct = min(99, int(round(secs / self.export_duration * 100)))
+                        self.status.configure(text=f"Exportando montaje… {pct}%", fg=YELLOW)
+                    else:
+                        self.status.configure(text="Exportando montaje…", fg=YELLOW)
+                elif kind == "export_done":
+                    self.exporting = False
+                    self.export_btn.configure(state="normal", text="Exportar")
+                    self.status.configure(text=f"Exportado: {event[1]}", fg=GREEN)
+                    messagebox.showinfo("Exportación terminada", f"Archivo creado:\n\n{event[1]}")
+                elif kind == "error":
+                    self.exporting = False
+                    self.export_btn.configure(state="normal", text="Exportar")
+                    self.status.configure(text="Error de exportación.", fg=RED)
+                    messagebox.showerror("Error", event[1])
+            if not getattr(self, "_destroyed", False) and self.playing and self.playback_started_at is not None:
+                elapsed = time.monotonic() - self.playback_started_at
+                self.cursor_time = min(self.playback_end_time, self.playback_start_time + elapsed)
                 clip = self.selected_clip
                 if clip and clip.media is self.selected_media:
                     self.playhead_timeline = clip.timeline_start + self.cursor_time - clip.source_in
                     self._update_timecode()
                     self.redraw_timeline()
                     self._ensure_playhead_visible()
-            elif kind == "play_done" and event[1] == self.frame_token:
-                was_timeline = self._playback_from_timeline
-                prev_clip = self.selected_clip
-                self._terminate_processes()
-                self.playing = False
-                self.playback_started_at = None
-                self.play_btn.configure(text="▶")
-                if was_timeline and prev_clip is not None:
-                    next_pos = prev_clip.timeline_end + 0.001
-                    _nt, next_clip = self._next_clip_after(next_pos)
-                    if next_clip and next_clip is not prev_clip and next_clip.timeline_end > next_pos:
-                        self.playhead_timeline = max(prev_clip.timeline_end, next_clip.timeline_start)
-                        self.play_from_cursor()
-                    else:
-                        self._playback_from_timeline = False
-                else:
-                    self._playback_from_timeline = False
-            elif kind == "play_error":
-                self.status.configure(text=f"Previsualización: {event[1]}", fg=RED)
-            elif kind == "audio_error":
-                self.status.configure(text=event[1], fg=RED)
-            elif kind == "progress":
-                secs = parse_ffmpeg_time(event[1])
-                if secs is not None and self.export_duration > 0:
-                    pct = min(99, int(round(secs / self.export_duration * 100)))
-                    self.status.configure(text=f"Exportando montaje… {pct}%", fg=YELLOW)
-                else:
-                    self.status.configure(text="Exportando montaje…", fg=YELLOW)
-            elif kind == "export_done":
-                self.exporting = False
-                self.export_btn.configure(state="normal", text="Exportar")
-                self.status.configure(text=f"Exportado: {event[1]}", fg=GREEN)
-                messagebox.showinfo("Exportación terminada", f"Archivo creado:\n\n{event[1]}")
-            elif kind == "error":
-                self.exporting = False
-                self.export_btn.configure(state="normal", text="Exportar")
-                self.status.configure(text="Error de exportación.", fg=RED)
-                messagebox.showerror("Error", event[1])
-        if not getattr(self, "_destroyed", False) and self.playing and self.playback_started_at is not None:
-            elapsed = time.monotonic() - self.playback_started_at
-            self.cursor_time = min(self.playback_end_time, self.playback_start_time + elapsed)
-            clip = self.selected_clip
-            if clip and clip.media is self.selected_media:
-                self.playhead_timeline = clip.timeline_start + self.cursor_time - clip.source_in
-                self._update_timecode()
-                self.redraw_timeline()
-                self._ensure_playhead_visible()
-        if not getattr(self, "_destroyed", False) and self.winfo_exists():
-            self._poll_after_id = self.after(60, self._poll_queue)
+        finally:
+            if not getattr(self, "_destroyed", False):
+                try:
+                    if self.winfo_exists():
+                        self._poll_after_id = self.after(60, self._poll_queue)
+                except tk.TclError:
+                    pass
 

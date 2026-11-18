@@ -1307,6 +1307,76 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_corrupt_frames_keep_poll_alive_audio_click_clears_preview_and_cross_track_refresh(self):
+        root = tk.Tk()
+        root.geometry("1200x800+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            a_media = MediaInfo(path="song.mp3", duration=8.0, has_video=False, has_audio=True)
+            v2 = panel.add_track("video")  # Vídeo 2
+
+            # 1. Al insertar o hacer clic en un clip de solo audio se limpia preview_photo anterior
+            panel.preview_photo = object()
+            panel.media_library = [a_media]
+            panel.media_list.insert("end", "♫ song.mp3")
+            panel.media_list.selection_set(0)
+            panel._insert_selected_media()
+            self.assertIsNone(panel.preview_photo)
+            self.assertIn("song.mp3", panel.preview.cget("text"))
+
+            panel.preview_photo = object()
+            panel.redraw_timeline()
+            root.update()
+            a_row = panel._layout()[1][0] + 15
+            ax = panel._x_at_time(1.0)
+            panel.timeline.event_generate("<ButtonPress-1>", x=int(ax), y=int(a_row))
+            root.update()
+            self.assertIsNone(panel.preview_photo)
+            panel.drag_clip = None
+
+            # 2. Al soltar un clip movido a otra pista se actualiza track_name en la UI
+            v_media = MediaInfo(path="clip.mp4", duration=6.0, has_video=True, has_audio=False, width=640, height=360, fps=30.0)
+            vclip = Clip(v_media, source_out=3.0, timeline_start=0.0)
+            panel.project.tracks[0].clips = [vclip]
+            panel.redraw_timeline()
+            root.update()
+            panel.drag_clip = vclip
+            panel.drag_track = panel.project.tracks[0]
+            panel.drag_offset = 5.0
+            v2_y = panel._layout()[2][0] + 15
+            panel._move_drag(panel.project.tracks[0], panel._x_at_time(1.0), v2_y, alt=True)
+            panel._timeline_release(type("E", (), {"x": 200, "y": int(v2_y)})())
+            self.assertIn(vclip, v2.clips)
+            self.assertEqual(panel.track_name.get(), v2.name)
+
+            # 3. _restore limpia drag_track, resize_side y _pending_snapshot
+            panel.drag_track = v2
+            panel.resize_side = "left"
+            panel._pending_snapshot = ("dummy",)
+            panel._restore(panel._snapshot())
+            self.assertIsNone(panel.drag_track)
+            self.assertIsNone(panel.resize_side)
+            self.assertIsNone(panel._pending_snapshot)
+
+            # 4. _poll_queue resiste fotogramas corruptos o incompletos y reagenda el temporizador
+            panel.frame_token = 9
+            panel.export_duration = 10.0
+            panel.ui_queue.put(("frame", 9, b"not-a-png"))
+            panel.ui_queue.put(("raw_frame", 9, b"short", 1.0))
+            panel.ui_queue.put(("progress", "time=00:00:05.00"))
+            panel._poll_after_id = None
+            panel._poll_queue()
+            self.assertIsNotNone(panel._poll_after_id)
+            self.assertIn("50%", panel.status.cget("text"))
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
