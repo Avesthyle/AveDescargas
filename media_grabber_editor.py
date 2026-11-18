@@ -3,7 +3,6 @@
 
 import ctypes
 import tkinter as tk
-from tkinterdnd2 import TkinterDnD
 
 import media_grabber
 from simple_editor_panel import SimpleEditorPanel
@@ -20,7 +19,11 @@ if __name__ == "__main__":
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
-    root = TkinterDnD.Tk()
+    try:
+        from tkinterdnd2 import TkinterDnD
+        root = TkinterDnD.Tk()
+    except Exception:
+        root = tk.Tk()
     media_grabber.MediaGrabberApp(root)
     root.mainloop()
 

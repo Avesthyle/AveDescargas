@@ -946,9 +946,20 @@ class MediaGrabberApp:
 
         self.setup_ui()
         set_dark_title_bar(self.root)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         
         # Start queue checking loop
         self.root.after(100, self.check_queue)
+
+    def on_close(self):
+        global CANCEL_REQUESTED
+        CANCEL_REQUESTED = True
+        if hasattr(self, "editor_panel") and hasattr(self.editor_panel, "stop_playback"):
+            try:
+                self.editor_panel.stop_playback()
+            except Exception:
+                pass
+        self.root.destroy()
 
     def center_window(self, width, height):
         screen_width = self.root.winfo_screenwidth()

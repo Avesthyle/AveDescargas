@@ -590,8 +590,8 @@ def build_export_plan(
 
     video_tracks = [track for track in tracks if track.kind == "video" and track.clips]
     first_video = next((clip for track in video_tracks for clip in track.clips if clip.media.has_video), None)
-    width = first_video.media.width if first_video else 0
-    height = first_video.media.height if first_video else 0
+    width = first_video.media.width if first_video and first_video.media.width > 0 else (1280 if first_video else 0)
+    height = first_video.media.height if first_video and first_video.media.height > 0 else (720 if first_video else 0)
     raw_fps = first_video.media.fps if first_video and first_video.media.fps else 30.0
     fps = raw_fps if 10.0 <= raw_fps <= 60.0 else 30.0
     if first_video:

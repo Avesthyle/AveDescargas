@@ -613,6 +613,24 @@ class EditorEndToEndTests(unittest.TestCase):
             panel.destroy()
             root.destroy()
 
+    def test_restore_clamps_playhead_and_shortcut_guards_modifiers(self):
+        root = tk.Tk()
+        root.withdraw()
+        panel = SimpleEditorPanel(root)
+        try:
+            v_media = MediaInfo(path="v.mp4", duration=10.0, has_video=True, has_audio=False, width=320, height=180, fps=30.0)
+            panel.project.tracks[0].clips.append(Clip(v_media, source_out=4.0, timeline_start=0.0))
+            panel.playhead_timeline = 15.0
+            panel._restore(panel._snapshot())
+            self.assertAlmostEqual(panel.playhead_timeline, 4.0, places=5)
+            called = []
+            ev_ctrl = type("E", (), {"state": 0x0004})()
+            self.assertIsNone(panel._shortcut(ev_ctrl, lambda: called.append(1), no_modifiers=True))
+            self.assertEqual(called, [])
+        finally:
+            panel.destroy()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -197,29 +197,39 @@ class SimpleEditorPanel(tk.Frame):
         self._button(toolbar, "📂", self.load_project_dialog, padx=2)
         self.set_tool("select")
         shortcuts = {
-            "<KeyPress-v>": lambda: self.set_tool("select"),
-            "<KeyPress-c>": lambda: self.set_tool("razor"),
-            "<KeyPress-s>": self.split_at_playhead,
-            "<space>": self.play_from_cursor,
-            "<Delete>": self.delete_clip,
-            "<Shift-Delete>": self.ripple_delete_clip,
-            "<BackSpace>": self.delete_clip,
-            "<Control-z>": self.undo,
-            "<Control-Z>": self.redo,
-            "<Control-y>": self.redo,
-            "<Control-k>": self.split_at_playhead,
-            "<Control-c>": self.copy_clip,
-            "<Control-v>": self.paste_clip,
-            "<Control-d>": self.duplicate_clip,
-            "<Control-s>": self.save_project_dialog,
-            "<Control-o>": self.load_project_dialog,
-            "<Left>": lambda: self._step_frames(-1),
-            "<Right>": lambda: self._step_frames(1),
-            "<Home>": lambda: self._move_playhead(0.0),
-            "<End>": lambda: self._move_playhead(self.project.duration()),
+            "<KeyPress-v>": (lambda: self.set_tool("select"), True),
+            "<KeyPress-V>": (lambda: self.set_tool("select"), True),
+            "<KeyPress-c>": (lambda: self.set_tool("razor"), True),
+            "<KeyPress-C>": (lambda: self.set_tool("razor"), True),
+            "<KeyPress-s>": (self.split_at_playhead, True),
+            "<KeyPress-S>": (self.split_at_playhead, True),
+            "<space>": (self.play_from_cursor, False),
+            "<Delete>": (self.delete_clip, False),
+            "<Shift-Delete>": (self.ripple_delete_clip, False),
+            "<BackSpace>": (self.delete_clip, False),
+            "<Control-z>": (self.undo, False),
+            "<Control-Z>": (self.redo, False),
+            "<Control-y>": (self.redo, False),
+            "<Control-Y>": (self.redo, False),
+            "<Control-k>": (self.split_at_playhead, False),
+            "<Control-K>": (self.split_at_playhead, False),
+            "<Control-c>": (self.copy_clip, False),
+            "<Control-C>": (self.copy_clip, False),
+            "<Control-v>": (self.paste_clip, False),
+            "<Control-V>": (self.paste_clip, False),
+            "<Control-d>": (self.duplicate_clip, False),
+            "<Control-D>": (self.duplicate_clip, False),
+            "<Control-s>": (self.save_project_dialog, False),
+            "<Control-S>": (self.save_project_dialog, False),
+            "<Control-o>": (self.load_project_dialog, False),
+            "<Control-O>": (self.load_project_dialog, False),
+            "<Left>": (lambda: self._step_frames(-1), False),
+            "<Right>": (lambda: self._step_frames(1), False),
+            "<Home>": (lambda: self._move_playhead(0.0), False),
+            "<End>": (lambda: self._move_playhead(self.project.duration()), False),
         }
-        for sequence, handler in shortcuts.items():
-            self.bind_all(sequence, lambda event, handler=handler: self._shortcut(event, handler), add="+")
+        for sequence, (handler, no_mod) in shortcuts.items():
+            self.bind_all(sequence, lambda event, handler=handler, no_mod=no_mod: self._shortcut(event, handler, no_mod), add="+")
 
         workspace = tk.PanedWindow(self, orient="horizontal", bg=BG, sashwidth=5, bd=0)
         workspace.pack(fill="both", expand=True, padx=10, pady=(8, 4))
@@ -251,7 +261,7 @@ class SimpleEditorPanel(tk.Frame):
         tk.Label(vol_row, text="Volumen (%)", bg=PANEL, fg=TEXT, font=("Segoe UI", 9, "bold")).pack(side="left")
         self.volume_spin = ttk.Spinbox(vol_row, from_=0, to=200, increment=5, textvariable=self.volume_var, width=6, command=self._apply_audio_props)
         self.volume_spin.pack(side="right")
-        self.volume_spin.bind("<Return>", lambda _e: self._apply_audio_props())
+        self.volume_spin.bind("<Return>", lambda _e: (self._apply_audio_props(), self.timeline.focus_set()))
         self.volume_spin.bind("<FocusOut>", lambda _e: self._apply_audio_props())
 
         fade_row = tk.Frame(inspector_panel, bg=PANEL)
@@ -261,9 +271,9 @@ class SimpleEditorPanel(tk.Frame):
         self.fade_out_spin.pack(side="right", padx=(2, 0))
         self.fade_in_spin = ttk.Spinbox(fade_row, from_=0.0, to=10.0, increment=0.25, textvariable=self.fade_in_var, width=5, command=self._apply_audio_props)
         self.fade_in_spin.pack(side="right")
-        self.fade_in_spin.bind("<Return>", lambda _e: self._apply_audio_props())
+        self.fade_in_spin.bind("<Return>", lambda _e: (self._apply_audio_props(), self.timeline.focus_set()))
         self.fade_in_spin.bind("<FocusOut>", lambda _e: self._apply_audio_props())
-        self.fade_out_spin.bind("<Return>", lambda _e: self._apply_audio_props())
+        self.fade_out_spin.bind("<Return>", lambda _e: (self._apply_audio_props(), self.timeline.focus_set()))
         self.fade_out_spin.bind("<FocusOut>", lambda _e: self._apply_audio_props())
 
         tk.Label(inspector_panel, text="Cambio de tono", bg=PANEL, fg=TEXT, font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=(8, 2))
@@ -373,8 +383,10 @@ class SimpleEditorPanel(tk.Frame):
     # Atajos, deshacer/rehacer
     # ------------------------------------------------------------------
 
-    def _shortcut(self, event, handler):
+    def _shortcut(self, event, handler, no_modifiers=False):
         """Ejecuta un atajo solo si el editor está visible y no se está escribiendo en un campo de texto."""
+        if no_modifiers and (getattr(event, "state", 0) & (0x0004 | 0x0008 | 0x20000)):
+            return None
         try:
             if not self.winfo_ismapped():
                 return None
@@ -406,6 +418,15 @@ class SimpleEditorPanel(tk.Frame):
         self.track_heights = heights
         self.selected_clip = None
         self.drag_clip = None
+        total = self.project.duration()
+        if self.playhead_timeline > total:
+            self.playhead_timeline = total
+        _t, active_clip = self._clip_at_playhead()
+        if active_clip and active_clip.media.has_video:
+            self.selected_media = active_clip.media
+            pos = timeline_to_source_time(active_clip, self.playhead_timeline)
+            if pos is not None:
+                self.request_frame(pos)
         self._refresh_tracks()
         self._update_inspector()
         self.redraw_timeline()
@@ -1689,6 +1710,7 @@ class SimpleEditorPanel(tk.Frame):
         return snapped
 
     def _timeline_press(self, event):
+        self.timeline.focus_set()
         if self.playing:
             self.stop_playback()
         if self.pending_library_media is not None and self._drop_library_media(event):

@@ -270,6 +270,11 @@ class ExportPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "silenciadas"):
             build_export_plan(EditorProject([Track("A1", "audio", muted=True, clips=[active_clip])]), "active", None, "salida.mp3")
 
+    def test_build_export_plan_falls_back_to_720p_when_video_dimensions_missing(self):
+        v = MediaInfo(path="nodim.mp4", duration=5.0, has_video=True, has_audio=False, width=0, height=0, fps=30.0)
+        plan = build_export_plan(EditorProject([Track("V1", "video", clips=[Clip(v, source_out=5)])]), "active", None, "salida.mp4")
+        self.assertEqual((plan["width"], plan["height"]), (1280, 720))
+
 
 if __name__ == "__main__":
     unittest.main()
