@@ -1448,7 +1448,7 @@ class MediaGrabberApp:
         current_name = self.custom_name_var.get().strip()
         auto_val = getattr(self, "_auto_title_value", None)
         is_auto = bool(auto_val and current_name == auto_val)
-        if len(urls) != 1 or has_playlist_reference(urls[0]) or not is_valid_http_url(urls[0]):
+        if len(urls) != 1 or has_playlist_reference(urls[0]) or not is_valid_http_url(urls[0]) or unsupported_download_reason(urls[0]):
             self.title_lookup_url = None
             if force or current_name == "Obteniendo título…" or is_auto:
                 self.custom_name_var.set("")
@@ -1592,7 +1592,7 @@ class MediaGrabberApp:
         except OSError:
             pass
 
-        if len(download_targets) == 1:
+        if len(download_targets) == 1 and not download_targets[0].get("allow_playlist"):
             raw_custom = self.custom_name_var.get().strip()
             auto_val = getattr(self, "_auto_title_value", None)
             if download_targets[0]["url"] != getattr(self, "title_lookup_url", None):

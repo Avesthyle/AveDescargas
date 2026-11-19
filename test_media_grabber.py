@@ -912,6 +912,74 @@ class PlaylistHandlingTests(unittest.TestCase):
         finally:
             media_grabber.CANCEL_REQUESTED = prev_cancel
 
+    def test_ronda28_full_playlist_skips_custom_name_and_unsupported_skips_title_lookup(self):
+        import tempfile
+        import types
+        from unittest import mock
+        import media_grabber
+
+        class DummyVar:
+            def __init__(self, val):
+                self._val = val
+            def get(self):
+                return self._val
+            def set(self, val):
+                self._val = val
+
+        # 1. load_title_async omite URLs no compatibles (p.ej. Spotify) y limpia estado previo
+        dummy_spotify = types.SimpleNamespace(
+            url_input=types.SimpleNamespace(get=lambda *_a: "https://open.spotify.com/track/123\n"),
+            custom_name_var=DummyVar("Obteniendo título…"),
+            _auto_title_value=None,
+            title_lookup_url="https://example.com/old",
+        )
+        with mock.patch("media_grabber.threading.Thread") as mocked_thread:
+            media_grabber.MediaGrabberApp.load_title_async(dummy_spotify)
+        mocked_thread.assert_not_called()
+        self.assertIsNone(dummy_spotify.title_lookup_url)
+        self.assertEqual(dummy_spotify.custom_name_var.get(), "")
+
+        # 2. on_download no fuerza custom_name único cuando allow_playlist=True
+        prev_downloading = media_grabber.IS_DOWNLOADING
+        prev_cancel = media_grabber.CANCEL_REQUESTED
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                media_grabber.IS_DOWNLOADING = False
+                media_grabber.CANCEL_REQUESTED = False
+                spawned = {}
+
+                class DummyThread:
+                    def __init__(self, target=None, args=(), daemon=False):
+                        spawned["targets"] = args[0]
+                    def start(self):
+                        pass
+
+                dummy = types.SimpleNamespace(
+                    url_input=types.SimpleNamespace(get=lambda *_a: "https://www.youtube.com/playlist?list=PL123\n"),
+                    clip_enabled_var=types.SimpleNamespace(get=lambda: False),
+                    resolve_download_targets=lambda u: [{"url": u[0], "allow_playlist": True}],
+                    folder_var=DummyVar(tmp),
+                    settings={},
+                    custom_name_var=DummyVar("Mi Playlist"),
+                    _auto_title_value=None,
+                    title_lookup_url=None,
+                    fmt_var=DummyVar("mp4"),
+                    quality_var=DummyVar("1080p (Full HD)"),
+                    video_audio_var=DummyVar("with_audio"),
+                    progress_bar={"value": 0},
+                    lbl_status=types.SimpleNamespace(configure=lambda **_kw: None),
+                    clear_log=lambda: None,
+                    log_to_terminal=lambda *_a: None,
+                    btn_download=types.SimpleNamespace(configure=lambda **_kw: None),
+                )
+                with mock.patch("media_grabber.threading.Thread", DummyThread), \
+                     mock.patch("media_grabber.save_settings"):
+                    media_grabber.MediaGrabberApp.on_download(dummy)
+                self.assertNotIn("custom_name", spawned["targets"][0])
+        finally:
+            media_grabber.IS_DOWNLOADING = prev_downloading
+            media_grabber.CANCEL_REQUESTED = prev_cancel
+
 
 if __name__ == "__main__":
     unittest.main()
