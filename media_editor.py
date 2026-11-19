@@ -405,7 +405,7 @@ MIN_CLIP_DURATION = 0.01
 def timeline_to_source_time(clip: Clip, timeline_time: float) -> Optional[float]:
     """Map project time to source time when the timeline cursor intersects a clip."""
     position = float(timeline_time)
-    if position < clip.timeline_start or position >= clip.timeline_end:
+    if not math.isfinite(position) or position < clip.timeline_start or position >= clip.timeline_end:
         return None
     return min(clip.source_out, clip.source_in + position - clip.timeline_start)
 
@@ -413,6 +413,8 @@ def timeline_to_source_time(clip: Clip, timeline_time: float) -> Optional[float]
 def split_clip(clip: Clip, timeline_time: float) -> Optional[tuple[Clip, Clip]]:
     """Divide un clip en dos conservando la correspondencia con el archivo fuente."""
     cut = float(timeline_time)
+    if not math.isfinite(cut):
+        return None
     if cut <= clip.timeline_start + MIN_CLIP_DURATION:
         return None
     if cut >= clip.timeline_end - MIN_CLIP_DURATION:
@@ -449,6 +451,8 @@ def clamp_fades(fade_in: float, fade_out: float, duration: float) -> tuple[float
         scale = dur / total
         f_in = round(f_in * scale, 3)
         f_out = round(f_out * scale, 3)
+        if f_in + f_out > dur:
+            f_out = max(0.0, math.floor(max(0.0, dur - f_in) * 1000.0) / 1000.0)
     return f_in, f_out
 
 
@@ -653,6 +657,8 @@ def probe_media(path: str) -> MediaInfo:
         None,
     )
     audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
+    if video is None and audio is None:
+        raise ValueError("El archivo no contiene pistas de vídeo ni de audio.")
     duration_values = [
         fmt.get("duration"),
         video.get("duration") if video else None,
@@ -1062,7 +1068,7 @@ def project_from_dict(data: dict) -> tuple[EditorProject, dict[str, float], list
                 raise ValueError(f"Índice de archivo inválido en proyecto: {media_idx}")
             base_media = media_list[media_idx]
             track_kind = t.get("kind")
-            clip_has_video = c.get("clip_has_video", track_kind == "video" and base_media.has_video)
+            clip_has_video = bool(c.get("clip_has_video", track_kind == "video")) and track_kind == "video" and base_media.has_video
             clip_media = base_media if (clip_has_video or not base_media.has_video) else audio_media_from_video(base_media)
             try:
                 vol = float(1.0 if c.get("volume") is None else c.get("volume"))

@@ -567,6 +567,47 @@ class ExportPlanTests(unittest.TestCase):
         self.assertGreater(snap_threshold(float("nan")), 0.0)
         self.assertIsNone(find_gap([], float("nan")))
 
+    def test_ronda26_nonfinite_cut_clamp_fades_rounding_and_streamless_probe(self):
+        from unittest import mock
+        from media_editor import (
+            clamp_fades,
+            probe_media,
+            project_from_dict,
+            split_clip,
+            timeline_to_source_time,
+        )
+
+        clip = Clip(video_info("v.mp4", duration=4.0), source_in=0.0, source_out=4.0, timeline_start=0.0)
+        self.assertIsNone(timeline_to_source_time(clip, float("nan")))
+        self.assertIsNone(timeline_to_source_time(clip, float("inf")))
+        self.assertIsNone(split_clip(clip, float("nan")))
+        self.assertIsNone(split_clip(clip, float("inf")))
+
+        f_in, f_out = clamp_fades(0.5, 0.5, 0.999)
+        self.assertLessEqual(f_in + f_out, 0.999)
+
+        sub_only = '{"streams": [{"codec_type": "subtitle", "duration": "4.0"}], "format": {"duration": "4.0"}}'
+        with mock.patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             mock.patch("media_editor.subprocess.run", return_value=mock.Mock(returncode=0, stdout=sub_only)):
+            with self.assertRaises(ValueError):
+                probe_media("subs.srt")
+
+        loaded, _media_list, _heights = project_from_dict({
+            "media": [{"path": "v.mp4", "duration": 5.0, "has_video": True, "has_audio": True}],
+            "tracks": [{
+                "name": "A1",
+                "kind": "audio",
+                "clips": [{
+                    "media_idx": 0,
+                    "source_in": 0.0,
+                    "source_out": 2.0,
+                    "timeline_start": 0.0,
+                    "clip_has_video": True,
+                }],
+            }],
+        })
+        self.assertFalse(loaded.tracks[0].clips[0].media.has_video)
+
 
 if __name__ == "__main__":
     unittest.main()
