@@ -3,18 +3,22 @@
 > **Para conversaciones nuevas:** lee **solo hasta la línea `HISTORIAL ANTIGUO`** (aprox. las primeras 75 líneas). Debajo se guarda el índice histórico de rondas anteriores para no cargar contexto innecesario.
 
 ## Estado actual
-- **Rama activa:** `feature/timeline-magnetica` (PR #1 abierto hacia `main`).
-- **Última ronda completada:** Ronda 31 (`890bdef`) + incorporación de `AGENTS.md` y `TAREAS.md`.
-- **Tests:** **188 tests en verde** (`unittest` bajo `xvfb-run`) y `pyflakes` limpio en los 5 módulos de producción.
+- **Rama activa:** `main` (Rondas 1–31 consolidadas + Ronda 32).
+- **Última ronda completada:** Ronda 32 — estado de audio en separación vinculada, confirmación de inspector al insertar/soltar medios y precisión de duración mínima en `EditorPanel`.
+- **Tests:** **189 tests en verde** (`unittest` bajo `xvfb-run`) y `pyflakes` limpio en los 5 módulos de producción.
 - **CI Windows (`Compilar para Windows`):** ejecución `#44469674403` (`success`, artefactos `AveDescargasEditor-exe` y `AveDescargasEditor-portable`).
 
 ## Pendientes / Próximas tareas
-- [ ] **Mergear PR #1 a `main`** en GitHub (cuando el usuario decida consolidar las 31 rondas en la rama principal).
 - [ ] Nuevas funcionalidades o mejoras que solicite el usuario en próximas conversaciones.
 
 ---
 
 ## Últimas rondas (más reciente arriba)
+
+- **Ronda 32 — Audio en separación vinculada, Spinbox al insertar/soltar y duración mínima 0.01 s**
+  - [`simple_editor_panel.py`](simple_editor_panel.py): `toggle_linked_media` conserva `use_source_audio=clip.use_source_audio` al separar audio de un vídeo silenciado; `_drop_library_media` e `_insert_selected_media` llaman a `_commit_inspector_edits()` antes de cambiar el clip seleccionado.
+  - [`editor_panel.py`](editor_panel.py): `EditorPanel.apply_clip_properties` usa `MIN_CLIP_DURATION - 1e-9` para no rechazar clips válidos de `0.01` s por precisión IEEE 754 (p. ej. `10.01 - 10.0`).
+  - Tests: `test_ronda32_toggle_linked_preserves_mute_library_insert_commits_inspector_and_min_duration` ([`test_editor_panel_gui.py`](test_editor_panel_gui.py)).
 
 - **Ronda 31 (`890bdef`) — Biblioteca en deshacer/rehacer, inspector y estado de importación**
   - [`simple_editor_panel.py`](simple_editor_panel.py): `_snapshot`/`_restore` incluyen `media_library` y `_missing_media_paths` reconstruyendo `media_list` con `_sync_media_listbox`; `remove_selected_library_media` registra `_push_undo()`; `_update_inspector` restablece `inspector_audio_btn` al deseleccionar clip.

@@ -1081,6 +1081,7 @@ class SimpleEditorPanel(tk.Frame):
         link_id = self._new_link_group()
         audio_clip = Clip(
             audio_media, clip.source_in, clip.source_out, clip.timeline_start,
+            use_source_audio=clip.use_source_audio,
             name=f"Audio · {clip.name}", link_group=link_id,
             pitch_semitones=clip.pitch_semitones, volume=clip.volume,
             fade_in=clip.fade_in, fade_out=clip.fade_out,
@@ -1429,6 +1430,7 @@ class SimpleEditorPanel(tk.Frame):
         return key in getattr(self, "_missing_media_paths", set()) and not os.path.isfile(media.path)
 
     def _drop_library_media(self, event, media_list=None):
+        self._commit_inspector_edits()
         items = list(media_list) if media_list is not None else ([self.pending_library_media] if self.pending_library_media else [])
         self.pending_library_media = None
         if not items:
@@ -1496,6 +1498,7 @@ class SimpleEditorPanel(tk.Frame):
         self.status.configure(text="Doble clic o arrastra a un canal para añadirlo a la línea de tiempo.", fg=TEXT)
 
     def _insert_selected_media(self):
+        self._commit_inspector_edits()
         selection = self.media_list.curselection()
         if not selection:
             return

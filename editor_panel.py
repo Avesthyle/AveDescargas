@@ -306,7 +306,7 @@ class EditorPanel(tk.Frame):
             new_start = parse_editor_time(self.start_var.get())
             if new_out <= new_in:
                 raise ValueError("La salida debe ser posterior a la entrada.")
-            if new_out - new_in < MIN_CLIP_DURATION:
+            if new_out - new_in < MIN_CLIP_DURATION - 1e-9:
                 raise ValueError("El clip debe durar al menos 0,01 s.")
             if new_out > clip.media.duration + 0.05:
                 raise ValueError("La salida supera la duración del archivo.")

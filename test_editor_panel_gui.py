@@ -2047,6 +2047,60 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_ronda32_toggle_linked_preserves_mute_library_insert_commits_inspector_and_min_duration(self):
+        from editor_panel import EditorPanel
+
+        root = tk.Tk()
+        root.geometry("1200x800+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            # 1. toggle_linked_media conserva use_source_audio=False al separar audio de un vídeo silenciado
+            vm = MediaInfo("/tmp/v_r32.mp4", 6.0, True, True, 640, 360, 30.0)
+            vc = Clip(vm, 0.0, 4.0, 0.0, use_source_audio=False)
+            panel.project.tracks[0].clips = [vc]
+            panel.selected_clip = vc
+            panel.toggle_linked_media()
+            linked_audio = [c for c in panel.project.tracks[1].clips if c.link_group == vc.link_group]
+            self.assertEqual(len(linked_audio), 1)
+            self.assertFalse(linked_audio[0].use_source_audio)
+
+            # 2. _insert_selected_media confirma cambios pendientes del Spinbox antes de cambiar de clip
+            panel.media_library = [vm]
+            panel._sync_media_listbox()
+            panel.selected_clip = vc
+            panel._update_inspector()
+            panel.volume_spin.focus_force()
+            root.update()
+            panel.volume_var.set("55")
+            panel.media_list.selection_set(0)
+            panel._insert_selected_media()
+            self.assertAlmostEqual(vc.volume, 0.55)
+
+            # 3. EditorPanel.apply_clip_properties acepta clips válidos de 0.01s pese a precisión IEEE 754 (10.01 - 10.0)
+            ep = EditorPanel(root)
+            am = MediaInfo("/tmp/a_r32.mp3", 20.0, False, True)
+            ep.add_track("audio")
+            clip = Clip(am, 0.0, 5.0, 0.0)
+            ep.project.tracks[0].clips.append(clip)
+            ep.selected_clip = clip
+            ep.in_var.set("10.00")
+            ep.out_var.set("10.01")
+            ep.start_var.set("0.00")
+            with mock.patch("editor_panel.messagebox.showerror") as err_mock:
+                ep.apply_clip_properties()
+            err_mock.assert_not_called()
+            self.assertAlmostEqual(clip.source_in, 10.0)
+            self.assertAlmostEqual(clip.source_out, 10.01)
+            ep.destroy()
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
