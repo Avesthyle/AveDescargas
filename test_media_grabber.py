@@ -861,6 +861,57 @@ class PlaylistHandlingTests(unittest.TestCase):
             media_grabber.IS_DOWNLOADING = prev_downloading
             media_grabber.CANCEL_REQUESTED = prev_cancel
 
+    def test_ronda27_cancel_during_retry_empty_host_reserved_dot_and_playlist_entries(self):
+        from unittest import mock
+        import media_grabber
+
+        self.assertFalse(media_grabber.is_valid_http_url("https://:8080/video"))
+        self.assertFalse(media_grabber.is_valid_http_url("https://user@/"))
+        self.assertEqual(media_grabber.sanitize_output_name("CON.foo"), "")
+        self.assertEqual(media_grabber.sanitize_output_name("NUL.tar.gz"), "")
+        self.assertEqual(media_grabber.sanitize_output_name("Mi.Video"), "Mi.Video")
+
+        self.assertEqual(media_grabber.playlist_entries_from_info({"entries": {"bad": 1}}), [])
+        entries = media_grabber.playlist_entries_from_info({
+            "entries": [{"title": "Track", "url": "https://soundcloud.com/artist/track"}]
+        })
+        self.assertEqual(entries, [{"title": "Track", "url": "https://soundcloud.com/artist/track"}])
+
+        # Cancel requested while an attempt fails prevents browser retries on Instagram
+        prev_cancel = media_grabber.CANCEL_REQUESTED
+        attempts_called = []
+
+        class FailingYDL:
+            def __init__(self, opts):
+                attempts_called.append(opts.get("cookiesfrombrowser"))
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+            def extract_info(self, url, download=True):
+                media_grabber.CANCEL_REQUESTED = True
+                raise RuntimeError("fallo temporal")
+
+        try:
+            while not media_grabber.ui_queue.empty():
+                media_grabber.ui_queue.get_nowait()
+            media_grabber.CANCEL_REQUESTED = False
+            with mock.patch("media_grabber.get_ffmpeg_path", return_value="/usr/bin/ffmpeg"), \
+                 mock.patch("media_grabber.yt_dlp.YoutubeDL", FailingYDL):
+                media_grabber.run_downloads_thread(
+                    [{"url": "https://www.instagram.com/reel/abc/", "allow_playlist": False}],
+                    ".", "mp4", "1080p (Full HD)",
+                )
+            self.assertEqual(len(attempts_called), 1)
+            msgs = []
+            while not media_grabber.ui_queue.empty():
+                msgs.append(media_grabber.ui_queue.get_nowait())
+            complete = [m for m in msgs if isinstance(m, dict) and m.get("type") == "complete"]
+            self.assertEqual(len(complete), 1)
+            self.assertTrue(complete[0]["cancelled"])
+        finally:
+            media_grabber.CANCEL_REQUESTED = prev_cancel
+
 
 if __name__ == "__main__":
     unittest.main()

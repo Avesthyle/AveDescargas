@@ -107,7 +107,7 @@ def preferred_download_folder(settings: dict, default: str) -> str:
 def sanitize_output_name(value: str) -> str:
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", (value or "")).strip()[:150].rstrip(". ")
     reserved = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
-    if not cleaned or cleaned.upper() in reserved:
+    if not cleaned or cleaned.split(".", 1)[0].upper() in reserved:
         return ""
     return cleaned
 
@@ -315,7 +315,7 @@ def is_valid_http_url(url: str) -> bool:
         parsed = urlparse(raw)
     except ValueError:
         return False
-    return parsed.scheme.lower() in ("http", "https") and bool(parsed.netloc)
+    return parsed.scheme.lower() in ("http", "https") and bool(parsed.hostname)
 
 
 def detect_platform(url: str) -> str:
@@ -441,6 +441,8 @@ def playlist_entries_from_info(info):
     """Normaliza las entradas planas devueltas por yt-dlp."""
     entries = []
     raw_entries = info.get("entries") if isinstance(info, dict) else None
+    if isinstance(raw_entries, (str, bytes, dict)):
+        raw_entries = None
     for entry in raw_entries or []:
         if not isinstance(entry, dict):
             continue
@@ -448,6 +450,8 @@ def playlist_entries_from_info(info):
         entry_url = entry.get("webpage_url")
         if not entry_url and entry_id:
             entry_url = f"https://www.youtube.com/watch?v={entry_id}"
+        if not entry_url and isinstance(entry.get("url"), str) and entry["url"].startswith(("http://", "https://")):
+            entry_url = entry["url"]
         if not entry_url:
             continue
         entries.append({
@@ -667,6 +671,8 @@ def run_downloads_thread(download_targets, output_dir, fmt, video_quality, inclu
                 last_error = None
                 login_browser_opened = False
                 for browser in attempts:
+                    if CANCEL_REQUESTED:
+                        raise DownloadCancelledException("Cancelado por el usuario")
                     opts = dict(ydl_opts)
                     if browser:
                         opts = authenticated_retry_options(ydl_opts, browser, platform)
@@ -676,6 +682,8 @@ def run_downloads_thread(download_targets, output_dir, fmt, video_quality, inclu
                     try:
                         with yt_dlp.YoutubeDL(opts) as ydl:
                             info = ydl.extract_info(url, download=True)
+                        if CANCEL_REQUESTED:
+                            raise DownloadCancelledException("Cancelado por el usuario")
                         if fmt == "mp4" and include_audio and not has_audio(info):
                             ui_queue.put({'type': 'log', 'text': 'ℹ️ Esta publicación no tiene audio disponible: se ha guardado solo el vídeo.', 'level': 'warning'})
                         last_error = None
@@ -683,6 +691,8 @@ def run_downloads_thread(download_targets, output_dir, fmt, video_quality, inclu
                     except DownloadCancelledException:
                         raise
                     except Exception as attempt_error:
+                        if CANCEL_REQUESTED:
+                            raise DownloadCancelledException("Cancelado por el usuario")
                         # Conserva el error real (sin audio) y no el de cookies
                         if last_error is None:
                             last_error = attempt_error
@@ -691,6 +701,8 @@ def run_downloads_thread(download_targets, output_dir, fmt, video_quality, inclu
                                 attempts.append('chrome')
                                 continue
                             if not login_browser_opened:
+                                if CANCEL_REQUESTED:
+                                    raise DownloadCancelledException("Cancelado por el usuario")
                                 login_browser_opened = True
                                 ui_queue.put({'type': 'youtube_login_opened'})
                                 login_process = open_youtube_login_browser(url)
