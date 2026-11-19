@@ -14,13 +14,17 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from media_editor import (
     Clip,
     EditorProject,
+    MIN_CLIP_DURATION,
     Track,
     build_export_plan,
+    clamp_fades,
     discover_ffmpeg_tools,
     format_editor_time,
     parse_editor_time,
     probe_media,
     run_export,
+    split_clip as split_timeline_clip,
+    unique_track_name,
 )
 
 
@@ -45,8 +49,20 @@ class EditorPanel(tk.Frame):
         self.drag_clip = None
         self.drag_offset = 0.0
         self.timeline_items = {}
+        self.exporting = False
+        self._destroyed = False
         self._build_ui()
-        self.after(100, self._poll_queue)
+        self._poll_after_id = self.after(100, self._poll_queue)
+
+    def destroy(self):
+        self._destroyed = True
+        if getattr(self, "_poll_after_id", None):
+            try:
+                self.after_cancel(self._poll_after_id)
+            except (AttributeError, tk.TclError, ValueError):
+                pass
+            self._poll_after_id = None
+        super().destroy()
 
     def _button(self, parent, text, command, color="#383838", **pack):
         button = tk.Button(
@@ -180,8 +196,8 @@ class EditorPanel(tk.Frame):
         return self.project.selected_track()
 
     def add_track(self, kind, name=None):
-        count = sum(1 for track in self.project.tracks if track.kind == kind) + 1
-        track = Track(name or (f"Vídeo {count}" if kind == "video" else f"Audio {count}"), kind)
+        track_name = name or unique_track_name([track.name for track in self.project.tracks], kind)
+        track = Track(track_name, kind)
         self.project.tracks.append(track)
         self.project.selected_track_index = len(self.project.tracks) - 1
         self.refresh()
@@ -195,6 +211,7 @@ class EditorPanel(tk.Frame):
         if not paths:
             return
         self.status.configure(text="Analizando archivos…", fg=YELLOW)
+        imported = 0
         for path in paths:
             try:
                 media = probe_media(path)
@@ -204,16 +221,27 @@ class EditorPanel(tk.Frame):
                     track = self.add_track(kind)
                 start = max((clip.timeline_end for clip in track.clips), default=0.0)
                 track.clips.append(Clip(media, timeline_start=start))
+                imported += 1
             except Exception as exc:
                 messagebox.showerror("No se pudo importar", f"{path}\n\n{exc}")
-        self.status.configure(text="Medios importados.", fg=GREEN)
+        if imported == len(paths):
+            self.status.configure(text="Medios importados.", fg=GREEN)
+        elif imported > 0:
+            self.status.configure(text=f"Importados {imported} de {len(paths)} archivo(s).", fg=YELLOW)
+        else:
+            self.status.configure(text="No se pudo importar ningún archivo.", fg="#ff6b6b")
         self.refresh()
 
     def _select_track(self, _event=None):
         selection = self.track_tree.selection()
         if not selection:
             return
-        self.project.selected_track_index = int(selection[0])
+        index = int(selection[0])
+        if not 0 <= index < len(self.project.tracks):
+            return
+        if index == self.project.selected_track_index:
+            return
+        self.project.selected_track_index = index
         self.selected_clip = None
         self.refresh_clips()
         self.redraw_timeline()
@@ -242,7 +270,7 @@ class EditorPanel(tk.Frame):
         index = self.project.selected_track_index
         if 0 <= index < len(self.project.tracks):
             del self.project.tracks[index]
-            self.project.selected_track_index = min(index, len(self.project.tracks) - 1)
+            self.project.selected_track_index = max(0, min(index, len(self.project.tracks) - 1))
             self.selected_clip = None
             self.refresh()
 
@@ -251,7 +279,10 @@ class EditorPanel(tk.Frame):
         track = self._current_track()
         if not selection or not track:
             return
-        self.selected_clip = track.clips[int(selection[0])]
+        index = int(selection[0])
+        if not 0 <= index < len(track.clips):
+            return
+        self.selected_clip = track.clips[index]
         self._load_clip_properties()
         self.redraw_timeline()
 
@@ -275,11 +306,14 @@ class EditorPanel(tk.Frame):
             new_start = parse_editor_time(self.start_var.get())
             if new_out <= new_in:
                 raise ValueError("La salida debe ser posterior a la entrada.")
+            if new_out - new_in < MIN_CLIP_DURATION:
+                raise ValueError("El clip debe durar al menos 0,01 s.")
             if new_out > clip.media.duration + 0.05:
                 raise ValueError("La salida supera la duración del archivo.")
             clip.source_in = new_in
             clip.source_out = new_out
             clip.timeline_start = new_start
+            clip.fade_in, clip.fade_out = clamp_fades(clip.fade_in, clip.fade_out, clip.duration)
             clip.use_source_audio = bool(self.clip_audio_var.get())
             self.refresh_clips()
             self.redraw_timeline()
@@ -289,7 +323,8 @@ class EditorPanel(tk.Frame):
     def split_clip(self):
         clip = self.selected_clip
         track = self._current_track()
-        if not clip or not track:
+        clip_index = next((i for i, item in enumerate(track.clips) if item is clip), None) if (clip and track) else None
+        if clip_index is None:
             return
         value = simpledialog.askstring(
             "Dividir clip",
@@ -303,25 +338,24 @@ class EditorPanel(tk.Frame):
             split = parse_editor_time(value)
             if not clip.source_in < split < clip.source_out:
                 raise ValueError("El corte debe estar entre la entrada y la salida del clip.")
-            index = track.clips.index(clip)
-            second = Clip(
-                clip.media, split, clip.source_out,
-                clip.timeline_start + (split - clip.source_in),
-                clip.use_source_audio, clip.name + " B",
-            )
-            clip.source_out = split
-            clip.name += " A"
-            track.clips.insert(index + 1, second)
-            self.selected_clip = second
+            timeline_cut = clip.timeline_start + (split - clip.source_in)
+            parts = split_timeline_clip(clip, timeline_cut)
+            if parts is None:
+                raise ValueError("El corte debe dejar dos partes de al menos 0,01 s.")
+            left, right = parts
+            track.clips[clip_index:clip_index + 1] = [left, right]
+            self.selected_clip = right
             self.refresh_clips()
             self.redraw_timeline()
+            self._load_clip_properties()
         except ValueError as exc:
             messagebox.showerror("Corte no válido", str(exc))
 
     def delete_clip(self):
         track = self._current_track()
-        if track and self.selected_clip in track.clips:
-            track.clips.remove(self.selected_clip)
+        clip_index = next((i for i, item in enumerate(track.clips) if item is self.selected_clip), None) if (track and self.selected_clip) else None
+        if clip_index is not None:
+            track.clips.pop(clip_index)
             self.selected_clip = None
             self.refresh_clips()
             self.redraw_timeline()
@@ -363,9 +397,10 @@ class EditorPanel(tk.Frame):
         label_width = 105
         duration = max(30.0, self.project.duration() + 5)
         total_width = label_width + duration * px
+        total_height = max(165, 25 + len(self.project.tracks) * row_height)
         for second in range(0, int(duration) + 1, 5):
             x = label_width + second * px
-            self.timeline.create_line(x, 0, x, max(165, len(self.project.tracks) * row_height), fill="#2e2e2e")
+            self.timeline.create_line(x, 0, x, total_height, fill="#2e2e2e")
             self.timeline.create_text(x + 3, 8, text=format_editor_time(second), fill=MUTED, anchor="nw", font=("Segoe UI", 7))
         for row, track in enumerate(self.project.tracks):
             y1 = 22 + row * row_height
@@ -383,17 +418,19 @@ class EditorPanel(tk.Frame):
                 else:
                     outline, width = "#8ab4d6", 1
                 item = self.timeline.create_rectangle(x1, y1 + 2, x2, y2 - 2, fill=color, outline=outline, width=width, tags=("clip",))
-                self.timeline.create_text(x1 + 5, (y1 + y2) / 2, text=clip.name, fill=TEXT, anchor="w", font=("Segoe UI", 8), tags=("clip_text",))
+                text_item = self.timeline.create_text(x1 + 5, (y1 + y2) / 2, text=clip.name, fill=TEXT, anchor="w", font=("Segoe UI", 8), tags=("clip_text",))
                 self.timeline_items[item] = (track, clip)
-        self.timeline.configure(scrollregion=(0, 0, total_width, max(165, 25 + len(self.project.tracks) * row_height)))
+                self.timeline_items[text_item] = (track, clip)
+        self.timeline.configure(scrollregion=(0, 0, total_width, total_height))
 
     def _timeline_press(self, event):
         x = self.timeline.canvasx(event.x)
         y = self.timeline.canvasy(event.y)
-        item = self.timeline.find_closest(x, y)
-        if not item or item[0] not in self.timeline_items:
+        hits = self.timeline.find_overlapping(x - 1, y - 1, x + 1, y + 1)
+        chosen = next((item_id for item_id in reversed(hits) if item_id in self.timeline_items), None)
+        if chosen is None:
             return
-        track, clip = self.timeline_items[item[0]]
+        track, clip = self.timeline_items[chosen]
         self.project.selected_track_index = self.project.tracks.index(track)
         self.selected_clip = clip
         self.drag_clip = clip
@@ -430,7 +467,7 @@ class EditorPanel(tk.Frame):
     def preview(self):
         folder = os.path.join(tempfile.gettempdir(), "AveDescargas")
         os.makedirs(folder, exist_ok=True)
-        output = os.path.join(folder, "previsualizacion.mp4")
+        output = os.path.join(folder, f"previsualizacion{self._default_extension()}")
         self._start_export(output, preview=True)
 
     def export(self):
@@ -448,6 +485,9 @@ class EditorPanel(tk.Frame):
             self._start_export(output, preview=False)
 
     def _start_export(self, output, preview):
+        if self.exporting:
+            self.status.configure(text="Ya hay una exportación en curso.", fg=YELLOW)
+            return
         try:
             plan = build_export_plan(
                 self.project, self._mode_key(), self.project.selected_track_index,
@@ -456,6 +496,7 @@ class EditorPanel(tk.Frame):
         except Exception as exc:
             messagebox.showerror("No se puede exportar", str(exc))
             return
+        self.exporting = True
         self.status.configure(text="Preparando previsualización…" if preview else "Exportando montaje…", fg=YELLOW)
 
         def worker():
@@ -468,28 +509,45 @@ class EditorPanel(tk.Frame):
         threading.Thread(target=worker, daemon=True).start()
 
     def _poll_queue(self):
-        while True:
+        if self._destroyed or not self.winfo_exists():
+            self._poll_after_id = None
+            return
+        if self._poll_after_id:
             try:
-                event = self.editor_queue.get_nowait()
-            except queue.Empty:
-                break
-            if event[0] == "progress":
-                text = event[1]
-                marker = text.split("time=", 1)[-1].split()[0] if "time=" in text else "procesando"
-                self.status.configure(text=f"Exportando: {marker}", fg=YELLOW)
-            elif event[0] == "error":
-                self.status.configure(text="Error durante la exportación.", fg="#ff6b6b")
-                messagebox.showerror("Error de exportación", event[1])
-            elif event[0] == "done":
-                path, preview = event[1], event[2]
-                self.status.configure(text=f"Terminado: {path}", fg=GREEN)
-                if preview:
-                    try:
-                        ffplay = discover_ffmpeg_tools()[2]
-                        subprocess.Popen([ffplay, "-autoexit", "-window_title", "AveDescargas - Previsualización", path])
-                    except Exception as exc:
-                        messagebox.showerror("No se pudo reproducir", str(exc))
-                else:
-                    messagebox.showinfo("Exportación terminada", f"Archivo creado:\n\n{path}")
-        self.after(100, self._poll_queue)
+                self.after_cancel(self._poll_after_id)
+            except (AttributeError, tk.TclError, ValueError):
+                pass
+            self._poll_after_id = None
+        try:
+            while True:
+                try:
+                    event = self.editor_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if event[0] == "progress":
+                    text = event[1]
+                    marker = text.split("time=", 1)[-1].split()[0] if "time=" in text else "procesando"
+                    self.status.configure(text=f"Exportando: {marker}", fg=YELLOW)
+                elif event[0] == "error":
+                    self.exporting = False
+                    self.status.configure(text="Error durante la exportación.", fg="#ff6b6b")
+                    messagebox.showerror("Error de exportación", event[1])
+                elif event[0] == "done":
+                    self.exporting = False
+                    path, preview = event[1], event[2]
+                    self.status.configure(text=f"Terminado: {path}", fg=GREEN)
+                    if preview:
+                        try:
+                            ffplay = discover_ffmpeg_tools()[2]
+                            subprocess.Popen(
+                                [ffplay, "-autoexit", "-window_title", "AveDescargas - Previsualización", path],
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                            )
+                        except Exception as exc:
+                            messagebox.showerror("No se pudo reproducir", str(exc))
+                    else:
+                        messagebox.showinfo("Exportación terminada", f"Archivo creado:\n\n{path}")
+        finally:
+            if not self._destroyed and self.winfo_exists():
+                self._poll_after_id = self.after(100, self._poll_queue)
 

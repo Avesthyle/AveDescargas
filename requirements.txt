@@ -1,6 +1,3 @@
-# Runtime dependencies
-Pillow
-numpy
-psutil
 yt-dlp
+Pillow
 tkinterdnd2

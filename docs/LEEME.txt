@@ -1,0 +1,28 @@
+AveDescargas Editor - versión portable
+======================================
+
+1. Descomprime la carpeta donde quieras (por ejemplo, en el Escritorio).
+2. Abre AveDescargasEditor.exe.
+
+FFmpeg ya va incluido en la carpeta "ffmpeg", no hace falta instalar nada.
+No separes el .exe de la carpeta "ffmpeg".
+
+Si Windows SmartScreen muestra "Windows protegió su PC", pulsa
+"Más información" -> "Ejecutar de todas formas" (el ejecutable no está
+firmado digitalmente).
+
+Novedades del editor
+--------------------
+- Imán: los clips se pegan solos a otros clips, al cabezal y a 00:00.
+  Mantén Alt al arrastrar para moverlos libremente.
+- Recorta arrastrando los bordes de un clip; también se enganchan.
+- Arrastra la línea entre dos pistas para cambiar su altura
+  (o Ctrl + rueda, o los botones Altura S / M / L).
+- Clic derecho en un hueco -> "Cerrar hueco".
+- Shift+Supr borra un clip y junta los siguientes.
+- "Pista principal magnética": la pista Vídeo 1 se mantiene sin huecos.
+- Ctrl+Z / Ctrl+Y para deshacer y rehacer.
+- S divide en el cabezal. Alt + rueda hace zoom; botón "Ajustar" ve todo.
+
+FFmpeg se distribuye bajo licencia GPL (ver ffmpeg\LICENSE.txt).
+Compilación de https://www.gyan.dev/ffmpeg/builds/

@@ -216,6 +216,398 @@ class ExportPlanTests(unittest.TestCase):
         plan = build_export_plan(project, "selected", None, "salida.mp3")
         self.assertEqual(plan["inputs"], ["audio.mp3"])
 
+    def test_odd_video_dimensions_are_rounded_to_even_for_libx264(self):
+        odd_media = MediaInfo(path="odd.mp4", duration=5.0, has_video=True, has_audio=False, width=853, height=405, fps=30.0)
+        track = Track("V", "video", clips=[Clip(odd_media, source_out=5)])
+        plan = build_export_plan(EditorProject([track]), "active", None, "salida.mp4")
+        self.assertEqual(plan["width"] % 2, 0)
+        self.assertEqual(plan["height"] % 2, 0)
+
+    def test_split_clip_clears_inner_fades(self):
+        clip = Clip(video_info("v.mp4", duration=10), source_out=10, fade_in=1.5, fade_out=2.0)
+        left, right = split_clip(clip, 5.0)
+        self.assertEqual(left.fade_in, 1.5)
+        self.assertEqual(left.fade_out, 0.0)
+        self.assertEqual(right.fade_in, 0.0)
+        self.assertEqual(right.fade_out, 2.0)
+
+    def test_project_to_dict_preserves_unused_media_library(self):
+        from media_editor import project_to_dict, project_from_dict
+        unused = video_info("unused.mp4", duration=8)
+        payload = project_to_dict(EditorProject([Track("V1", "video")]), media_library=[unused])
+        _proj, _heights, media_list = project_from_dict(payload)
+        self.assertEqual([m.path for m in media_list], ["unused.mp4"])
+
+    def test_resize_clamps_overlapping_fades(self):
+        clip = Clip(video_info("v.mp4", duration=10), source_out=10, fade_in=3.0, fade_out=3.0)
+        shrunk = resize_clip_right(clip, 2.0)
+        self.assertLessEqual(shrunk.fade_in + shrunk.fade_out, shrunk.duration + 1e-6)
+
+    def test_extreme_vfr_fps_is_clamped_to_safe_default(self):
+        vfr = MediaInfo(path="vfr.webm", duration=5.0, has_video=True, has_audio=False, width=640, height=360, fps=1000.0)
+        plan = build_export_plan(EditorProject([Track("V", "video", clips=[Clip(vfr, source_out=5)])]), "active", None, "salida.mp4")
+        self.assertEqual(plan["fps"], 30.0)
+
+    def test_split_clip_clamps_fades_and_avoids_accumulating_suffixes(self):
+        clip = Clip(video_info("v.mp4", duration=10), source_out=10, name="clip · 1", fade_in=5.0, fade_out=4.0)
+        left, right = split_clip(clip, 2.0)
+        self.assertEqual(left.name, "clip · 1")
+        self.assertEqual(right.name, "clip · 2")
+        self.assertLessEqual(left.fade_in, left.duration + 1e-6)
+        self.assertEqual(right.fade_out, 4.0)
+
+    def test_build_export_plan_respects_use_source_audio_on_audio_track(self):
+        muted_audio = Clip(audio_info("a.mp3", duration=5), source_out=5, use_source_audio=False)
+        active_audio = Clip(audio_info("b.mp3", duration=5), source_out=5, timeline_start=5, use_source_audio=True)
+        plan = build_export_plan(EditorProject([Track("A1", "audio", clips=[muted_audio, active_audio])]), "active", None, "salida.mp3")
+        self.assertEqual(len(plan["audio_labels"]), 1)
+
+    def test_build_export_plan_rejects_fully_muted_audio_only_project(self):
+        muted_clip = Clip(audio_info("a.mp3", duration=5), source_out=5, use_source_audio=False)
+        with self.assertRaisesRegex(ValueError, "silenciadas"):
+            build_export_plan(EditorProject([Track("A1", "audio", clips=[muted_clip])]), "active", None, "salida.mp3")
+        active_clip = Clip(audio_info("a.mp3", duration=5), source_out=5, use_source_audio=True)
+        with self.assertRaisesRegex(ValueError, "silenciadas"):
+            build_export_plan(EditorProject([Track("A1", "audio", muted=True, clips=[active_clip])]), "active", None, "salida.mp3")
+
+    def test_build_export_plan_falls_back_to_720p_when_video_dimensions_missing(self):
+        v = MediaInfo(path="nodim.mp4", duration=5.0, has_video=True, has_audio=False, width=0, height=0, fps=30.0)
+        plan = build_export_plan(EditorProject([Track("V1", "video", clips=[Clip(v, source_out=5)])]), "active", None, "salida.mp4")
+        self.assertEqual((plan["width"], plan["height"]), (1280, 720))
+
+    def test_probe_media_skips_empty_or_zero_duration(self):
+        import json
+        from media_editor import probe_media
+        payload = json.dumps({
+            "format": {"duration": "", "format_name": "mp4"},
+            "streams": [
+                {"codec_type": "video", "width": 1280, "height": 720, "avg_frame_rate": "30/1", "duration": "0"},
+                {"codec_type": "audio", "duration": "12.5", "codec_name": "aac"},
+            ],
+        })
+        fake = type("R", (), {"returncode": 0, "stdout": payload, "stderr": ""})()
+        with patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             patch("media_editor.subprocess.run", return_value=fake):
+            info = probe_media("test.mp4")
+        self.assertAlmostEqual(info.duration, 12.5, places=3)
+
+    def test_build_export_plan_normalizes_clip_fps_for_mixed_rates(self):
+        v24 = MediaInfo(path="a24.mp4", duration=4.0, has_video=True, has_audio=False, width=1280, height=720, fps=24.0)
+        v60 = MediaInfo(path="b60.mp4", duration=4.0, has_video=True, has_audio=False, width=1280, height=720, fps=60.0)
+        track = Track("V1", "video", clips=[Clip(v24, source_out=4, timeline_start=0), Clip(v60, source_out=4, timeline_start=4)])
+        plan = build_export_plan(EditorProject([track]), "active", None, "salida.mp4")
+        self.assertEqual(plan["fps"], 60.0)
+        self.assertGreaterEqual(plan["filter_complex"].count("fps=60"), 2)
+
+    def test_project_round_trip_deduplicates_separated_audio_media(self):
+        from media_editor import audio_media_from_video, project_from_dict, project_to_dict
+        v = video_info("shared.mp4", duration=10.0)
+        a = audio_media_from_video(v)
+        proj = EditorProject([
+            Track("Vídeo 1", "video", clips=[Clip(v, source_out=6.0, use_source_audio=False, link_group="g1")]),
+            Track("Audio 1", "audio", clips=[Clip(a, source_out=6.0, link_group="g1")]),
+        ])
+        payload = project_to_dict(proj, media_library=[v])
+        self.assertEqual(len(payload["media"]), 1)
+        restored, _heights, restored_media = project_from_dict(payload)
+        self.assertEqual(len(restored_media), 1)
+        self.assertTrue(restored.tracks[0].clips[0].media.has_video)
+        self.assertFalse(restored.tracks[1].clips[0].media.has_video)
+
+    def test_probe_media_handles_null_dimensions_and_project_from_dict_validates_bounds(self):
+        import json
+        from media_editor import probe_media, project_from_dict
+        payload = json.dumps({
+            "format": {"duration": "8.0", "format_name": "mp4"},
+            "streams": [{"codec_type": "video", "width": None, "height": None, "avg_frame_rate": "30/1"}],
+        })
+        fake = type("R", (), {"returncode": 0, "stdout": payload, "stderr": ""})()
+        with patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             patch("media_editor.subprocess.run", return_value=fake):
+            info = probe_media("null_dim.mp4")
+        self.assertEqual((info.width, info.height), (0, 0))
+
+        restored, _, _ = project_from_dict({
+            "media": [{"path": "a.mp4", "duration": 5.0, "has_video": True, "has_audio": False, "width": None, "height": None, "fps": None}],
+            "tracks": [{"name": "V1", "kind": "video", "clips": [{"media_idx": 0, "source_in": 0, "source_out": 5, "timeline_start": 0, "volume": None}]}],
+            "selected_track_index": 99,
+            "track_heights": None,
+        })
+        self.assertEqual(restored.selected_track_index, 0)
+        self.assertEqual(restored.tracks[0].clips[0].volume, 1.0)
+        with self.assertRaises(ValueError):
+            project_from_dict({"media": [], "tracks": [{"name": "V1", "kind": "video", "clips": [{"media_idx": 3, "source_in": 0, "source_out": 1, "timeline_start": 0}]}]})
+
+    def test_upper_overlay_track_fades_use_alpha_and_run_export_cleans_aborted_process(self):
+        from media_editor import run_export
+        top = Track("Superior", "video", clips=[Clip(video_info("top.mp4"), source_out=5, fade_in=1.0)])
+        bottom = Track("Inferior", "video", clips=[Clip(video_info("bottom.mp4"), source_out=5, fade_in=1.0)])
+        plan = build_export_plan(EditorProject([top, bottom]), "active", None, "salida.mp4")
+        fc = plan["filter_complex"]
+        self.assertIn("format=yuva420p,fade=t=in:st=0:d=1:alpha=1", fc)
+        self.assertIn(":color=black@0", fc)
+
+        fake_proc = type("Proc", (), {})()
+        terminated = []
+        fake_proc.stdout = type("Stdout", (), {
+            "__iter__": lambda self: iter(["time=00:00:01.00\n"]),
+            "close": lambda self: None,
+        })()
+        fake_proc.poll = lambda: None
+        fake_proc.terminate = lambda: terminated.append(True)
+        fake_proc.wait = lambda timeout=None: 0
+        with patch("media_editor.subprocess.Popen", return_value=fake_proc):
+            with self.assertRaises(RuntimeError):
+                run_export({"command": ["ffmpeg"], "output_path": "/tmp/out_abort.mp4"}, lambda _l: (_ for _ in ()).throw(RuntimeError("abort")))
+        self.assertEqual(terminated, [True])
+
+    def test_pitch_resamples_first_fps_handles_zero_and_project_validation(self):
+        import os
+        from media_editor import _parse_fps, project_from_dict, save_project, load_project
+
+        pf = build_pitch_filter(4)
+        self.assertTrue(pf.startswith("aresample=44100,asetrate=44100*"))
+
+        self.assertEqual(_parse_fps("30/0"), 0.0)
+        self.assertEqual(_parse_fps("N/A"), 0.0)
+
+        vtrack = Track("V1", "video", clips=[Clip(video_info("v.mp4"), source_out=5)])
+        for ext in (".m4a", ".flac", ".ogg"):
+            with self.assertRaisesRegex(ValueError, "MP4"):
+                build_export_plan(EditorProject([vtrack]), "active", None, f"out{ext}")
+
+        atrack = Track("A1", "audio", clips=[Clip(audio_info("a.mp3"), source_out=5)])
+        flac_plan = build_export_plan(EditorProject([atrack]), "active", None, "out.flac")
+        ogg_plan = build_export_plan(EditorProject([atrack]), "active", None, "out.ogg")
+        self.assertIn("flac", flac_plan["command"])
+        self.assertIn("libopus", ogg_plan["command"])
+
+        with self.assertRaises(ValueError):
+            project_from_dict({"media": [{"path": "x.mp4"}], "tracks": []})
+        proj, heights, _ = project_from_dict({"media": [], "tracks": [], "track_heights": ["bad"]})
+        self.assertEqual(heights, {})
+
+        with tempfile.TemporaryDirectory() as folder:
+            proj_path = os.path.join(folder, "sub", "demo.avep")
+            save_project(proj_path, EditorProject([atrack]), {"A1": 70.0})
+            self.assertFalse(os.path.exists(f"{proj_path}.tmp"))
+            loaded, loaded_h, _ = load_project(proj_path)
+            self.assertEqual(len(loaded.tracks), 1)
+            self.assertEqual(loaded_h["A1"], 70.0)
+
+    def test_attached_pic_ignored_finite_validation_export_ext_and_waveform_timeout(self):
+        import json
+        import subprocess
+        from media_editor import probe_media, project_from_dict, clamp_track_height
+
+        # 1. Carátula embebida (attached_pic=1) en MP3 no convierte la canción en vídeo
+        payload = json.dumps({
+            "format": {"duration": "120.5", "format_name": "mp3"},
+            "streams": [
+                {"codec_type": "audio", "codec_name": "mp3", "duration": "120.5"},
+                {"codec_type": "video", "codec_name": "mjpeg", "width": 500, "height": 500, "disposition": {"attached_pic": 1}},
+            ],
+        })
+        fake = type("R", (), {"returncode": 0, "stdout": payload, "stderr": ""})()
+        with patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             patch("media_editor.subprocess.run", return_value=fake):
+            info = probe_media("cover.mp3")
+        self.assertFalse(info.has_video)
+        self.assertTrue(info.has_audio)
+
+        # 2. waveform_samples devuelve silencio si FFmpeg agota el timeout
+        with patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             patch("media_editor.subprocess.run", side_effect=subprocess.TimeoutExpired("ffmpeg", 30)):
+            self.assertEqual(waveform_samples("slow.mp4", 4), [0.0, 0.0, 0.0, 0.0])
+
+        # 3. Exportar vídeo rechaza extensiones no válidas y limita faststart a mp4/mov
+        vtrack = Track("V1", "video", clips=[Clip(video_info("v.mp4"), source_out=5)])
+        with self.assertRaisesRegex(ValueError, "MP4"):
+            build_export_plan(EditorProject([vtrack]), "active", None, "salida.txt")
+        mkv_plan = build_export_plan(EditorProject([vtrack]), "active", None, "salida.mkv")
+        mp4_plan = build_export_plan(EditorProject([vtrack]), "active", None, "salida.mp4")
+        self.assertNotIn("-movflags", mkv_plan["command"])
+        self.assertIn("-movflags", mp4_plan["command"])
+
+        # 4. parse_editor_time, clamp_track_height y project_from_dict rechazan NaN/Inf/bool
+        with self.assertRaises(ValueError):
+            parse_editor_time("nan")
+        with self.assertRaises(ValueError):
+            parse_editor_time(True)
+        with self.assertRaises(ValueError):
+            clamp_track_height(float("inf"))
+        with self.assertRaises(ValueError):
+            project_from_dict({"media": [{"path": "x.mp4", "duration": float("nan"), "has_video": True, "has_audio": False}], "tracks": []})
+
+    def test_upper_overlay_transparent_pad_without_fades_clip_finite_probe_timeout_and_overflow(self):
+        import subprocess
+        from media_editor import probe_media, project_from_dict
+
+        # 1. Capa superior sin fade también usa yuva420p y color=black@0 para no tapar la pista inferior
+        top = Track("Superior", "video", clips=[Clip(video_info("top.mp4"), source_out=4)])
+        bottom = Track("Inferior", "video", clips=[Clip(video_info("bottom.mp4"), source_out=4)])
+        plan = build_export_plan(EditorProject([top, bottom]), "active", None, "salida.mp4")
+        self.assertIn("format=yuva420p", plan["filter_complex"])
+        self.assertIn(":color=black@0", plan["filter_complex"])
+
+        # 2. Clip rechaza volume/fade_in/fade_out no finitos
+        with self.assertRaises(ValueError):
+            Clip(video_info("v.mp4"), source_out=2.0, volume=float("nan"))
+        with self.assertRaises(ValueError):
+            Clip(video_info("v.mp4"), source_out=2.0, fade_in=float("inf"))
+
+        # 3. probe_media captura TimeoutExpired con ValueError
+        with patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             patch("media_editor.subprocess.run", side_effect=subprocess.TimeoutExpired("ffprobe", 30)):
+            with self.assertRaisesRegex(ValueError, "agotado"):
+                probe_media("hang.mp4")
+
+        # 4. project_from_dict controla OverflowError por float('nan')/'inf' en campos enteros
+        with self.assertRaises(ValueError):
+            project_from_dict({
+                "media": [{"path": "a.mp4", "duration": 5.0, "has_video": True, "has_audio": False}],
+                "tracks": [{"name": "V1", "kind": "video", "clips": [{"media_idx": 0, "source_in": 0, "source_out": 2, "timeline_start": 0, "pitch_semitones": float("inf")}]}],
+            })
+        proj, _, _ = project_from_dict({"media": [], "tracks": [], "selected_track_index": float("nan")})
+        self.assertEqual(proj.selected_track_index, 0)
+
+    def test_playback_range_restarts_at_mark_in_when_cursor_reaches_mark_out(self):
+        # Si el cursor está en el final o después de mark_out dentro de un rango marcado,
+        # debe reiniciar el tramo [mark_in, mark_out] y no desbordar hasta duration.
+        self.assertEqual(playback_range(6.0, 2.0, 6.0, 20.0), (2.0, 6.0))
+        self.assertEqual(playback_range(12.0, 2.0, 6.0, 20.0), (2.0, 6.0))
+        self.assertEqual(playback_range(2.5, 2.0, 6.0, 20.0), (2.5, 6.0))
+        self.assertEqual(playback_range(5.0, 0.0, 0.0, 20.0), (5.0, 20.0))
+
+    def test_format_editor_time_carries_rounded_seconds_and_waveform_segment_tail(self):
+        from media_editor import format_editor_time
+
+        self.assertEqual(format_editor_time(59.999), "01:00.00")
+        self.assertEqual(format_editor_time(3599.999), "01:00:00.00")
+        self.assertEqual(format_editor_time(float("nan")), "00:00.00")
+        self.assertEqual(format_editor_time(float("inf")), "00:00.00")
+        segment = waveform_segment([0.1, 0.2, 0.3], 2.99, 3.0, 3.0, sample_count=8)
+        self.assertEqual(len(segment), 8)
+        self.assertEqual(segment[-1], 0.3)
+
+    def test_clip_minimum_duration_zero_fade_omission_and_bool_json_fields(self):
+        from media_editor import project_from_dict
+
+        with self.assertRaises(ValueError):
+            Clip(video_info("tiny.mp4"), source_in=0.0, source_out=0.0004)
+        with self.assertRaises(ValueError):
+            Clip(video_info("bool.mp4"), source_out=2.0, pitch_semitones=True)
+
+        clip = Clip(video_info("v.mp4"), source_out=3.0, fade_in=0.0004, fade_out=0.0004)
+        plan = build_export_plan(EditorProject([Track("V1", "video", clips=[clip])]), "active", None, "salida.mp4")
+        self.assertNotIn("fade=t=", plan["filter_complex"])
+        self.assertNotIn("afade=t=", plan["filter_complex"])
+
+        with self.assertRaises(ValueError):
+            project_from_dict({"media": [{"path": "a.mp4", "duration": 5.0, "has_video": True, "has_audio": False, "width": True}], "tracks": []})
+        with self.assertRaises(ValueError):
+            project_from_dict({
+                "media": [{"path": "a.mp4", "duration": 5.0, "has_video": True, "has_audio": False}],
+                "tracks": [{"name": "V1", "kind": "video", "clips": [{"media_idx": 0, "source_in": 0, "source_out": 2, "timeline_start": 0, "pitch_semitones": True}]}],
+            })
+
+    def test_parse_editor_time_rejects_negative_parts_and_waveform_sanitizes_nonfinite(self):
+        with self.assertRaises(ValueError):
+            parse_editor_time("1:-5")
+        with self.assertRaises(ValueError):
+            parse_editor_time("01:-02:03")
+        bars = waveform_from_values([float("nan"), float("inf"), 0.0, 0.5], sample_count=2)
+        self.assertEqual(bars, [0.0, 1.0])
+
+    def test_ripple_delete_targets_exact_clip_identity_when_equal_copy_exists(self):
+        from media_editor import ripple_delete
+
+        a = audio_info("sfx.mp3", duration=4.0)
+        c1 = Clip(a, source_in=0.0, source_out=2.0, timeline_start=0.0)
+        c2 = Clip(a, source_in=0.0, source_out=2.0, timeline_start=0.0)
+        c3 = Clip(a, source_in=0.0, source_out=1.0, timeline_start=3.0)
+        clips = [c1, c2, c3]
+        self.assertEqual(c1, c2)
+        shift = ripple_delete(clips, c2)
+        self.assertAlmostEqual(shift, 2.0)
+        self.assertEqual(len(clips), 2)
+        self.assertIs(clips[0], c1)
+        self.assertIs(clips[1], c3)
+        self.assertAlmostEqual(c3.timeline_start, 1.0)
+
+    def test_probe_media_handles_null_json_and_nonfinite_helpers(self):
+        from unittest import mock
+        from media_editor import (
+            avoid_clip_overlap,
+            clamp_fades,
+            collect_snap_points,
+            find_gap,
+            probe_media,
+            snap_point,
+            snap_threshold,
+            snap_timeline_position,
+        )
+
+        payload = '{"streams": [{"codec_type": "video", "duration": "4.0", "width": "bad", "height": 360, "avg_frame_rate": "inf"}], "format": null}'
+        with mock.patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             mock.patch("media_editor.subprocess.run", return_value=mock.Mock(returncode=0, stdout=payload)):
+            info = probe_media("x.mp4")
+        self.assertEqual((info.width, info.height, info.fps), (0, 360, 0.0))
+
+        with mock.patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             mock.patch("media_editor.subprocess.run", return_value=mock.Mock(returncode=0, stdout='{"streams": null, "format": null}')):
+            with self.assertRaises(ValueError):
+                probe_media("empty.mp4")
+
+        self.assertEqual(clamp_fades(float("nan"), 1.0, 4.0), (0.0, 1.0))
+        self.assertEqual(avoid_clip_overlap(float("nan"), 2.0, []), 0.0)
+        self.assertEqual(collect_snap_points([], playhead=float("nan")), [0.0])
+        self.assertEqual(snap_timeline_position(float("nan"), 2.0, [1.0, float("nan")], 0.5), (0.0, None))
+        self.assertEqual(snap_point(float("nan"), [1.0, float("nan")], 0.5), (0.0, None))
+        self.assertGreater(snap_threshold(float("nan")), 0.0)
+        self.assertIsNone(find_gap([], float("nan")))
+
+    def test_ronda26_nonfinite_cut_clamp_fades_rounding_and_streamless_probe(self):
+        from unittest import mock
+        from media_editor import (
+            clamp_fades,
+            probe_media,
+            project_from_dict,
+            split_clip,
+            timeline_to_source_time,
+        )
+
+        clip = Clip(video_info("v.mp4", duration=4.0), source_in=0.0, source_out=4.0, timeline_start=0.0)
+        self.assertIsNone(timeline_to_source_time(clip, float("nan")))
+        self.assertIsNone(timeline_to_source_time(clip, float("inf")))
+        self.assertIsNone(split_clip(clip, float("nan")))
+        self.assertIsNone(split_clip(clip, float("inf")))
+
+        f_in, f_out = clamp_fades(0.5, 0.5, 0.999)
+        self.assertLessEqual(f_in + f_out, 0.999)
+
+        sub_only = '{"streams": [{"codec_type": "subtitle", "duration": "4.0"}], "format": {"duration": "4.0"}}'
+        with mock.patch("media_editor.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+             mock.patch("media_editor.subprocess.run", return_value=mock.Mock(returncode=0, stdout=sub_only)):
+            with self.assertRaises(ValueError):
+                probe_media("subs.srt")
+
+        loaded, _media_list, _heights = project_from_dict({
+            "media": [{"path": "v.mp4", "duration": 5.0, "has_video": True, "has_audio": True}],
+            "tracks": [{
+                "name": "A1",
+                "kind": "audio",
+                "clips": [{
+                    "media_idx": 0,
+                    "source_in": 0.0,
+                    "source_out": 2.0,
+                    "timeline_start": 0.0,
+                    "clip_has_video": True,
+                }],
+            }],
+        })
+        self.assertFalse(loaded.tracks[0].clips[0].media.has_video)
+
 
 if __name__ == "__main__":
     unittest.main()

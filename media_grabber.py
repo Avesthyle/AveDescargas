@@ -8,6 +8,7 @@ import os
 import sys
 import re
 import json
+import math
 import subprocess
 import threading
 import ctypes
@@ -19,7 +20,10 @@ from urllib.parse import parse_qs, urlparse
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import yt_dlp
 from yt_dlp.utils import download_range_func
-from editor_panel import EditorPanel
+try:
+    from simple_editor_panel import SimpleEditorPanel as EditorPanel
+except Exception:
+    from editor_panel import EditorPanel
 
 # --- DWM Immersive Dark Mode for Windows 10/11 ---
 def set_dark_title_bar(window):
@@ -41,7 +45,11 @@ def set_dark_title_bar(window):
 # --- FFmpeg Discovery ---
 def get_ffmpeg_path():
     """Detecta la ubicación de FFmpeg en ubicaciones comunes o en el PATH de Windows."""
+    app_dir = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
     FFMPEG_LOCATIONS = [
+        os.path.join(app_dir, "ffmpeg", "bin", "ffmpeg.exe"),
+        os.path.join(app_dir, "ffmpeg", "ffmpeg.exe"),
+        os.path.join(app_dir, "ffmpeg.exe"),
         "C:\\ffmpeg_shared4\\ffmpeg-master-latest-win64-gpl-shared\\bin\\ffmpeg.exe",
         "C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe",
         "C:\\ffmpeg\\bin\\ffmpeg.exe",
@@ -82,7 +90,9 @@ def load_settings(path: str) -> dict:
 
 
 def save_settings(path: str, settings: dict) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(settings, handle, ensure_ascii=False, indent=2)
@@ -95,11 +105,11 @@ def preferred_download_folder(settings: dict, default: str) -> str:
 
 
 def sanitize_output_name(value: str) -> str:
-    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", (value or "")).strip().rstrip(". ")
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", (value or "")).strip()[:150].rstrip(". ")
     reserved = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
-    if not cleaned or cleaned.upper() in reserved:
+    if not cleaned or cleaned.split(".", 1)[0].upper() in reserved:
         return ""
-    return cleaned[:150]
+    return cleaned
 
 
 def is_youtube_auth_challenge(error) -> bool:
@@ -285,27 +295,49 @@ def youtube_extractor_options(fmt: str, include_audio: bool) -> dict:
 
 def has_audio(info) -> bool:
     """Indica si los formatos elegidos por yt-dlp incluyen pista de audio."""
-    if not info:
+    if not isinstance(info, dict):
         return True
     if info.get("entries"):
-        return all(has_audio(e) for e in info["entries"] if e)
+        return all(has_audio(e) for e in info["entries"] if isinstance(e, dict))
     formats = info.get("requested_formats") or [info]
-    return any(f.get("acodec") != "none" for f in formats)
+    return any(isinstance(f, dict) and f.get("acodec") != "none" for f in formats)
 
 # --- Custom Exception for Cancellation ---
 class DownloadCancelledException(Exception):
     pass
 
 # --- Helpers ---
+def is_valid_http_url(url: str) -> bool:
+    raw = (url or "").strip()
+    if not raw or any(ch.isspace() for ch in raw):
+        return False
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return False
+    return parsed.scheme.lower() in ("http", "https") and bool(parsed.hostname)
+
+
 def detect_platform(url: str) -> str:
-    url = url.strip().lower()
-    if "open.spotify.com" in url or "spotify.link" in url:
+    raw = (url or "").strip()
+    if not raw:
+        return "general"
+    try:
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return "general"
+
+    def matches(*domains):
+        return any(host == dom or host.endswith(f".{dom}") for dom in domains)
+
+    if matches("open.spotify.com", "spotify.link"):
         return "spotify"
-    if "youtube.com" in url or "youtu.be" in url:
+    if matches("youtube.com", "youtu.be", "youtube-nocookie.com"):
         return "youtube"
-    if "instagram.com" in url or "instagr.am" in url:
+    if matches("instagram.com", "instagr.am"):
         return "instagram"
-    if "facebook.com" in url or "fb.watch" in url or "fb.com" in url:
+    if matches("facebook.com", "fb.watch", "fb.com"):
         return "facebook"
     return "general"
 
@@ -408,13 +440,18 @@ def build_output_template(output_dir: str, target):
 def playlist_entries_from_info(info):
     """Normaliza las entradas planas devueltas por yt-dlp."""
     entries = []
-    for entry in (info or {}).get("entries") or []:
-        if not entry:
+    raw_entries = info.get("entries") if isinstance(info, dict) else None
+    if isinstance(raw_entries, (str, bytes, dict)):
+        raw_entries = None
+    for entry in raw_entries or []:
+        if not isinstance(entry, dict):
             continue
         entry_id = entry.get("id")
         entry_url = entry.get("webpage_url")
         if not entry_url and entry_id:
             entry_url = f"https://www.youtube.com/watch?v={entry_id}"
+        if not entry_url and isinstance(entry.get("url"), str) and entry["url"].startswith(("http://", "https://")):
+            entry_url = entry["url"]
         if not entry_url:
             continue
         entries.append({
@@ -432,6 +469,7 @@ def fetch_playlist_entries(url: str):
         "extract_flat": True,
         "skip_download": True,
         "ignoreerrors": True,
+        "socket_timeout": 15,
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -439,12 +477,18 @@ def fetch_playlist_entries(url: str):
 
 def clean_folder(folder: str):
     """Elimina archivos temporales dejados por descargas incompletas o canceladas."""
-    temp_exts = {".part", ".ytdl", ".download", ".temp", ".m4a", ".webm", ".mkv", ".jpg", ".png", ".webp"}
+    temp_exts = {".part", ".ytdl", ".download", ".temp"}
     deleted_count = 0
     try:
         for f in os.listdir(folder):
-            _, ext = os.path.splitext(f)
-            if ext.lower() in temp_exts:
+            lower = f.lower()
+            _, ext = os.path.splitext(lower)
+            is_temp = (
+                ext in temp_exts
+                or ".temp." in lower
+                or bool(re.search(r"\.f\d+\.[a-z0-9]{2,5}$", lower))
+            )
+            if is_temp:
                 try:
                     os.remove(os.path.join(folder, f))
                     deleted_count += 1
@@ -471,7 +515,6 @@ class YtDlpLogger:
         ui_queue.put({'type': 'log', 'text': msg, 'level': 'error'})
 
 def progress_hook(d):
-    global CANCEL_REQUESTED
     if CANCEL_REQUESTED:
         raise DownloadCancelledException("Cancelado por el usuario")
 
@@ -489,7 +532,11 @@ def progress_hook(d):
 
         try:
             percent_val = float(percent_str.replace('%', '').strip())
-        except ValueError:
+            if not math.isfinite(percent_val):
+                percent_val = 0.0
+            else:
+                percent_val = max(0.0, min(100.0, percent_val))
+        except (TypeError, ValueError):
             percent_val = 0.0
 
         ui_queue.put({
@@ -512,174 +559,199 @@ def run_downloads_thread(download_targets, output_dir, fmt, video_quality, inclu
     IS_DOWNLOADING = True
     CANCEL_REQUESTED = False
 
-    ffmpeg_path = get_ffmpeg_path()
-    ui_queue.put({'type': 'start', 'total': len(download_targets)})
-
     ok_count = 0
     err_count = 0
     cancelled = False
 
-    for index, target in enumerate(download_targets):
-        if CANCEL_REQUESTED:
-            cancelled = True
-            break
+    try:
+        ffmpeg_path = get_ffmpeg_path()
+        ui_queue.put({'type': 'start', 'total': len(download_targets)})
 
-        url = target['url'].strip()
-        if not url:
-            continue
+        for index, target in enumerate(download_targets):
+            if CANCEL_REQUESTED:
+                cancelled = True
+                break
 
-        platform = detect_platform(url)
-        ui_queue.put({'type': 'active_url', 'index': index, 'url': url, 'platform': platform})
-        if fmt == "mp4":
-            notice = heavy_clip_notice(target, video_quality)
-            if notice:
-                ui_queue.put({'type': 'log', 'text': notice, 'level': 'warning'})
+            url = target['url'].strip()
+            if not url:
+                continue
 
-        node_path = shutil.which("node")
-        ydl_opts = {
-            # El ID evita que dos vídeos con el mismo título se sobrescriban.
-            'outtmpl': build_output_template(output_dir, target),
-            'overwrites': False,
-            'logger': YtDlpLogger(),
-            'progress_hooks': [progress_hook],
-            'nocheckcertificate': True,
-            'ignoreerrors': False,
-            'no_color': True,
-            'quiet': True,
-            'remote_components': ['ejs:github'],
-        }
-        ydl_opts.update(download_scope_options(target))
-        ydl_opts.update(clip_download_options(target, fmt))
+            platform = detect_platform(url)
+            ui_queue.put({'type': 'active_url', 'index': index, 'url': url, 'platform': platform})
+            if fmt == "mp4":
+                notice = heavy_clip_notice(target, video_quality)
+                if notice:
+                    ui_queue.put({'type': 'log', 'text': notice, 'level': 'warning'})
 
-        if node_path:
-            ydl_opts['js_runtimes'] = {
-                'node': {
-                    'path': node_path
-                }
+            node_path = shutil.which("node")
+            ydl_opts = {
+                # El ID evita que dos vídeos con el mismo título se sobrescriban.
+                'outtmpl': build_output_template(output_dir, target),
+                'overwrites': False,
+                'logger': YtDlpLogger(),
+                'progress_hooks': [progress_hook],
+                'nocheckcertificate': True,
+                'ignoreerrors': False,
+                'no_color': True,
+                'quiet': True,
+                'remote_components': ['ejs:github'],
             }
+            ydl_opts.update(download_scope_options(target))
+            ydl_opts.update(clip_download_options(target, fmt))
 
-        if ffmpeg_path:
-            ydl_opts['ffmpeg_location'] = ffmpeg_path
-
-        if target.get('section_start') is not None and not ffmpeg_path:
-            ui_queue.put({
-                'type': 'log',
-                'text': '❌ FFmpeg no está instalado o no se encuentra. Es necesario para descargar solo un fragmento.',
-                'level': 'error'
-            })
-            err_count += 1
-            continue
-
-        if fmt == "mp3":
-            ydl_opts.update({
-                'format': 'bestaudio[ext=m4a]/bestaudio/best',
-                'postprocessors': [
-                    {
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '320',
-                    },
-                    {
-                        'key': 'EmbedThumbnail',
+            if node_path:
+                ydl_opts['js_runtimes'] = {
+                    'node': {
+                        'path': node_path
                     }
-                ],
-                'writethumbnail': True,
-            })
-        else: # mp4
-            if include_audio and not ffmpeg_path:
+                }
+
+            if ffmpeg_path:
+                ydl_opts['ffmpeg_location'] = ffmpeg_path
+
+            if target.get('section_start') is not None and not ffmpeg_path:
                 ui_queue.put({
                     'type': 'log',
-                    'text': '❌ FFmpeg no está instalado o no se encuentra. Es necesario para unir vídeo y sonido.',
+                    'text': '❌ FFmpeg no está instalado o no se encuentra. Es necesario para descargar solo un fragmento.',
                     'level': 'error'
                 })
                 err_count += 1
                 continue
-            ydl_opts.update({
-                'format': build_video_format(video_quality, include_audio),
-                'merge_output_format': 'mp4',
-            })
-            if not include_audio:
-                ydl_opts['postprocessors'] = [{
-                    'key': 'FFmpegVideoRemuxer',
-                    'preferedformat': 'mp4',
-                }]
 
-        if platform == 'youtube':
-            ydl_opts.update(youtube_extractor_options(fmt, include_audio))
-        # Instagram solo entrega el audio de algunas publicaciones a sesiones
-        # iniciadas: si falla sin sesión, se reintenta con cookies del navegador.
-        attempts = [None]
-        if platform == 'instagram':
-            attempts += ['firefox', 'edge', 'chrome', 'brave', 'opera']
-        try:
-            last_error = None
-            login_browser_opened = False
-            for browser in attempts:
-                opts = dict(ydl_opts)
-                if browser:
-                    opts = authenticated_retry_options(ydl_opts, browser, platform)
-                    service = 'YouTube' if platform == 'youtube' else 'Instagram'
-                    shown_browser = 'chrome' if browser.startswith('chrome') else browser
-                    ui_queue.put({'type': 'log', 'text': f'🔑 Reintentando {service} con la sesión de {shown_browser}...', 'level': 'warning'})
-                try:
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        info = ydl.extract_info(url, download=True)
-                    if fmt == "mp4" and include_audio and not has_audio(info):
-                        ui_queue.put({'type': 'log', 'text': 'ℹ️ Esta publicación no tiene audio disponible: se ha guardado solo el vídeo.', 'level': 'warning'})
-                    last_error = None
-                    break
-                except DownloadCancelledException:
-                    raise
-                except Exception as attempt_error:
-                    # Conserva el error real (sin audio) y no el de cookies
-                    if last_error is None:
-                        last_error = attempt_error
-                    if platform == 'youtube' and is_youtube_auth_challenge(attempt_error):
-                        if browser is None and youtube_profile_has_cookies():
-                            attempts.append('chrome')
-                            continue
-                        if not login_browser_opened:
-                            login_browser_opened = True
-                            ui_queue.put({'type': 'youtube_login_opened'})
-                            login_process = open_youtube_login_browser(url)
-                            if login_process is None:
-                                ui_queue.put({'type': 'log', 'text': '❌ No se pudo abrir Chrome para iniciar sesión en YouTube.', 'level': 'error'})
-                                break
-                            while login_process.poll() is None and not CANCEL_REQUESTED:
-                                time.sleep(0.5)
-                            if CANCEL_REQUESTED:
-                                raise DownloadCancelledException("Cancelado por el usuario")
-                            if youtube_profile_has_cookies():
-                                attempts.append('chrome_refreshed')
-                                continue
-                    if platform != 'instagram':
+            if fmt == "mp3":
+                if not ffmpeg_path:
+                    ui_queue.put({
+                        'type': 'log',
+                        'text': '❌ FFmpeg no está instalado o no se encuentra. Es necesario para convertir el audio a MP3.',
+                        'level': 'error'
+                    })
+                    err_count += 1
+                    continue
+                ydl_opts.update({
+                    'format': 'bestaudio[ext=m4a]/bestaudio/best',
+                    'postprocessors': [
+                        {
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': '320',
+                        },
+                        {
+                            'key': 'EmbedThumbnail',
+                        }
+                    ],
+                    'writethumbnail': True,
+                })
+            else: # mp4
+                if include_audio and not ffmpeg_path:
+                    ui_queue.put({
+                        'type': 'log',
+                        'text': '❌ FFmpeg no está instalado o no se encuentra. Es necesario para unir vídeo y sonido.',
+                        'level': 'error'
+                    })
+                    err_count += 1
+                    continue
+                ydl_opts.update({
+                    'format': build_video_format(video_quality, include_audio),
+                    'merge_output_format': 'mp4',
+                })
+                if not include_audio:
+                    ydl_opts['postprocessors'] = [{
+                        'key': 'FFmpegVideoRemuxer',
+                        'preferedformat': 'mp4',
+                    }]
+
+            if platform == 'youtube':
+                ydl_opts.update(youtube_extractor_options(fmt, include_audio))
+            # Instagram solo entrega el audio de algunas publicaciones a sesiones
+            # iniciadas: si falla sin sesión, se reintenta con cookies del navegador.
+            attempts = [None]
+            if platform == 'instagram':
+                attempts += ['firefox', 'edge', 'chrome', 'brave', 'opera']
+            try:
+                last_error = None
+                login_browser_opened = False
+                for browser in attempts:
+                    if CANCEL_REQUESTED:
+                        raise DownloadCancelledException("Cancelado por el usuario")
+                    opts = dict(ydl_opts)
+                    if browser:
+                        opts = authenticated_retry_options(ydl_opts, browser, platform)
+                        service = 'YouTube' if platform == 'youtube' else 'Instagram'
+                        shown_browser = 'chrome' if browser.startswith('chrome') else browser
+                        ui_queue.put({'type': 'log', 'text': f'🔑 Reintentando {service} con la sesión de {shown_browser}...', 'level': 'warning'})
+                    try:
+                        with yt_dlp.YoutubeDL(opts) as ydl:
+                            info = ydl.extract_info(url, download=True)
+                        if CANCEL_REQUESTED:
+                            raise DownloadCancelledException("Cancelado por el usuario")
+                        if fmt == "mp4" and include_audio and not has_audio(info):
+                            ui_queue.put({'type': 'log', 'text': 'ℹ️ Esta publicación no tiene audio disponible: se ha guardado solo el vídeo.', 'level': 'warning'})
+                        last_error = None
                         break
-            if last_error:
-                raise last_error
-            ok_count += 1
-        except DownloadCancelledException:
-            cancelled = True
-            ui_queue.put({'type': 'log', 'text': '🚫 Proceso interrumpido por el usuario.', 'level': 'warning'})
-            break
-        except Exception as e:
-            err_msg = str(e)
-            err_msg = re.sub(r'ERROR:\s*', '', err_msg)
-            if fmt == "mp4" and include_audio and "Requested format is not available" in err_msg:
-                err_msg = (
-                    "Instagram no entrega el audio de esta publicación sin sesión iniciada. "
-                    "Inicia sesión en Instagram en Firefox, Edge o Chrome (y cierra el navegador) "
-                    "y vuelve a intentarlo; no se guardará un vídeo sin sonido."
-                )
-            ui_queue.put({'type': 'log', 'text': f"❌ Error: {err_msg}", 'level': 'error'})
-            err_count += 1
-
-    ui_queue.put({
-        'type': 'complete',
-        'ok_count': ok_count,
-        'err_count': err_count,
-        'cancelled': cancelled
-    })
-    IS_DOWNLOADING = False
+                    except DownloadCancelledException:
+                        raise
+                    except Exception as attempt_error:
+                        if CANCEL_REQUESTED:
+                            raise DownloadCancelledException("Cancelado por el usuario")
+                        # Conserva el error real (sin audio) y no el de cookies
+                        if last_error is None:
+                            last_error = attempt_error
+                        if platform == 'youtube' and is_youtube_auth_challenge(attempt_error):
+                            if browser is None and youtube_profile_has_cookies():
+                                attempts.append('chrome')
+                                continue
+                            if not login_browser_opened:
+                                if CANCEL_REQUESTED:
+                                    raise DownloadCancelledException("Cancelado por el usuario")
+                                login_browser_opened = True
+                                ui_queue.put({'type': 'youtube_login_opened'})
+                                login_process = open_youtube_login_browser(url)
+                                if login_process is None:
+                                    ui_queue.put({'type': 'log', 'text': '❌ No se pudo abrir Chrome para iniciar sesión en YouTube.', 'level': 'error'})
+                                    break
+                                while login_process.poll() is None and not CANCEL_REQUESTED:
+                                    time.sleep(0.5)
+                                if CANCEL_REQUESTED:
+                                    if login_process.poll() is None:
+                                        try:
+                                            login_process.terminate()
+                                        except Exception:
+                                            pass
+                                    raise DownloadCancelledException("Cancelado por el usuario")
+                                if youtube_profile_has_cookies():
+                                    attempts.append('chrome_refreshed')
+                                    continue
+                        if platform != 'instagram':
+                            break
+                if last_error:
+                    raise last_error
+                ok_count += 1
+            except DownloadCancelledException:
+                cancelled = True
+                ui_queue.put({'type': 'log', 'text': '🚫 Proceso interrumpido por el usuario.', 'level': 'warning'})
+                break
+            except Exception as e:
+                err_msg = str(e)
+                err_msg = re.sub(r'ERROR:\s*', '', err_msg)
+                if fmt == "mp4" and include_audio and "Requested format is not available" in err_msg:
+                    err_msg = (
+                        "Instagram no entrega el audio de esta publicación sin sesión iniciada. "
+                        "Inicia sesión en Instagram en Firefox, Edge o Chrome (y cierra el navegador) "
+                        "y vuelve a intentarlo; no se guardará un vídeo sin sonido."
+                    )
+                ui_queue.put({'type': 'log', 'text': f"❌ Error: {err_msg}", 'level': 'error'})
+                err_count += 1
+    except Exception as exc:
+        err_count += 1
+        ui_queue.put({'type': 'log', 'text': f"❌ Error inesperado: {exc}", 'level': 'error'})
+    finally:
+        IS_DOWNLOADING = False
+        ui_queue.put({
+            'type': 'complete',
+            'ok_count': ok_count,
+            'err_count': err_count,
+            'cancelled': cancelled
+        })
 
 
 def ask_playlist_action(parent):
@@ -748,9 +820,13 @@ def ask_playlist_action(parent):
 
     dialog.protocol("WM_DELETE_WINDOW", lambda: choose(None))
     dialog.update_idletasks()
-    x = parent.winfo_rootx() + (parent.winfo_width() - dialog.winfo_reqwidth()) // 2
-    y = parent.winfo_rooty() + (parent.winfo_height() - dialog.winfo_reqheight()) // 2
-    dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+    screen_w = dialog.winfo_screenwidth()
+    screen_h = dialog.winfo_screenheight()
+    req_w = dialog.winfo_reqwidth()
+    req_h = dialog.winfo_reqheight()
+    x = max(0, min(screen_w - req_w, parent.winfo_rootx() + (parent.winfo_width() - req_w) // 2))
+    y = max(0, min(screen_h - req_h, parent.winfo_rooty() + (parent.winfo_height() - req_h) // 2))
+    dialog.geometry(f"+{x}+{y}")
     dialog.grab_set()
     parent.wait_window(dialog)
     return result["value"]
@@ -760,8 +836,14 @@ def select_playlist_entries(parent, url):
     """Carga una playlist y permite elegir entradas mediante casillas."""
     dialog = tk.Toplevel(parent)
     dialog.title("Seleccionar canciones de la playlist")
-    dialog.geometry("650x520")
-    dialog.minsize(520, 380)
+    screen_w = dialog.winfo_screenwidth()
+    screen_h = dialog.winfo_screenheight()
+    win_w = min(650, max(360, screen_w - 40))
+    win_h = min(520, max(300, screen_h - 60))
+    pos_x = max(0, min(screen_w - win_w, parent.winfo_rootx() + (parent.winfo_width() - win_w) // 2))
+    pos_y = max(0, min(screen_h - win_h, parent.winfo_rooty() + (parent.winfo_height() - win_h) // 2))
+    dialog.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+    dialog.minsize(min(520, win_w), min(380, win_h))
     dialog.configure(bg="#1a1a1a")
     dialog.transient(parent)
     dialog.columnconfigure(0, weight=1)
@@ -782,9 +864,21 @@ def select_playlist_entries(parent, url):
     loading.grid(row=1, column=0, sticky="ew", padx=16, pady=16)
     loading.start(12)
 
+    poll_after_id = {"id": None}
+
     def close(value=None):
         result["value"] = value
-        dialog.destroy()
+        if poll_after_id["id"]:
+            try:
+                dialog.after_cancel(poll_after_id["id"])
+            except (AttributeError, tk.TclError, ValueError):
+                pass
+            poll_after_id["id"] = None
+        try:
+            if dialog.winfo_exists():
+                dialog.destroy()
+        except tk.TclError:
+            pass
 
     def populate(entries):
         loading.stop()
@@ -804,13 +898,30 @@ def select_playlist_entries(parent, url):
         scrollbar.grid(row=0, column=1, sticky="ns")
         inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(inner_id, width=e.width))
-        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+
+        def scroll_playlist(e, step=None):
+            if step is None:
+                delta = getattr(e, "delta", 0)
+                step = -1 if delta > 0 else (1 if delta < 0 else 0)
+            if step:
+                try:
+                    canvas.yview_scroll(step, "units")
+                except tk.TclError:
+                    pass
+
+        def bind_scroll(widget):
+            widget.bind("<MouseWheel>", scroll_playlist)
+            widget.bind("<Button-4>", lambda e: scroll_playlist(e, -1))
+            widget.bind("<Button-5>", lambda e: scroll_playlist(e, 1))
+
+        bind_scroll(canvas)
+        bind_scroll(inner)
 
         selections = []
         for index, entry in enumerate(entries, 1):
             selected = tk.BooleanVar(value=True)
             selections.append((selected, entry["url"]))
-            tk.Checkbutton(
+            cb = tk.Checkbutton(
                 inner,
                 text=f"{index}. {entry['title']}",
                 variable=selected,
@@ -822,8 +933,10 @@ def select_playlist_entries(parent, url):
                 selectcolor="#1e1e1e",
                 anchor="w",
                 justify="left",
-                wraplength=540,
-            ).pack(fill="x", padx=10, pady=3)
+                wraplength=max(240, win_w - 110),
+            )
+            cb.pack(fill="x", padx=10, pady=3)
+            bind_scroll(cb)
 
         controls = tk.Frame(dialog, bg="#1a1a1a")
         controls.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 14))
@@ -861,11 +974,20 @@ def select_playlist_entries(parent, url):
         ).pack(side="right", padx=6)
 
     def poll_loader():
+        poll_after_id["id"] = None
+        try:
+            if not dialog.winfo_exists():
+                return
+        except tk.TclError:
+            return
         try:
             status, payload = load_queue.get_nowait()
         except queue.Empty:
-            if dialog.winfo_exists():
-                dialog.after(100, poll_loader)
+            try:
+                if dialog.winfo_exists():
+                    poll_after_id["id"] = dialog.after(100, poll_loader)
+            except tk.TclError:
+                pass
             return
         if status == "error":
             messagebox.showerror(
@@ -894,7 +1016,7 @@ def select_playlist_entries(parent, url):
     dialog.protocol("WM_DELETE_WINDOW", lambda: close(None))
     dialog.grab_set()
     threading.Thread(target=loader, daemon=True).start()
-    dialog.after(100, poll_loader)
+    poll_after_id["id"] = dialog.after(100, poll_loader)
     parent.wait_window(dialog)
     return result["value"]
 
@@ -905,6 +1027,7 @@ class MediaGrabberApp:
         self.root = root
         self.settings = load_settings(SETTINGS_PATH)
         self.title_lookup_url = None
+        self._auto_title_value = None
         self.root.title("AveDescargas — Descargador Universal")
         self.root.geometry("1100x720")
         self.root.minsize(650, 480)
@@ -933,16 +1056,52 @@ class MediaGrabberApp:
 
         self.setup_ui()
         set_dark_title_bar(self.root)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         
         # Start queue checking loop
-        self.root.after(100, self.check_queue)
+        self._queue_after_id = self.root.after(100, self.check_queue)
+
+    def on_close(self):
+        global CANCEL_REQUESTED
+        editor_panel = getattr(self, "editor_panel", None)
+        if getattr(editor_panel, "exporting", False):
+            if not messagebox.askyesno(
+                "Exportación en curso",
+                "Hay una exportación en curso.\n\n¿Seguro que quieres cerrar la aplicación y cancelar la exportación?",
+            ):
+                return
+        if IS_DOWNLOADING:
+            if not messagebox.askyesno(
+                "Descarga en curso",
+                "Hay una descarga en curso.\n\n¿Seguro que quieres cerrar la aplicación y cancelar la descarga?",
+            ):
+                return
+        CANCEL_REQUESTED = True
+        after_id = getattr(self, "_queue_after_id", None)
+        if after_id:
+            try:
+                self.root.after_cancel(after_id)
+            except (AttributeError, tk.TclError, ValueError):
+                pass
+            self._queue_after_id = None
+        if editor_panel is not None:
+            try:
+                if hasattr(editor_panel, "destroy"):
+                    editor_panel.destroy()
+                elif hasattr(editor_panel, "stop_playback"):
+                    editor_panel.stop_playback()
+            except Exception:
+                pass
+        self.root.destroy()
 
     def center_window(self, width, height):
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
-        x = (screen_width - width) // 2
-        y = (screen_height - height) // 2
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        actual_w = min(width, max(650, screen_width - 40))
+        actual_h = min(height, max(480, screen_height - 60))
+        x = max(0, (screen_width - actual_w) // 2)
+        y = max(0, (screen_height - actual_h) // 2)
+        self.root.geometry(f"{actual_w}x{actual_h}+{x}+{y}")
 
     def setup_ui(self):
         self.notebook = ttk.Notebook(self.root)
@@ -982,15 +1141,30 @@ class MediaGrabberApp:
             )
             update_scroll_region()
 
-        def scroll_body(event):
-            if event.widget.winfo_toplevel() != self.root:
+        def scroll_body(event, step=None):
+            widget = getattr(event, "widget", None)
+            if not widget or not hasattr(widget, "winfo_toplevel"):
                 return
-            if self.body_canvas.bbox("all"):
-                self.body_canvas.yview_scroll(int(-event.delta / 120), "units")
+            try:
+                if widget.winfo_toplevel() != self.root:
+                    return
+                if self.notebook.select() != str(self.download_tab):
+                    return
+            except tk.TclError:
+                return
+            if widget in (self.terminal, self.url_input):
+                return
+            if step is None:
+                delta = getattr(event, "delta", 0)
+                step = -1 if delta > 0 else (1 if delta < 0 else 0)
+            if step and self.body_canvas.bbox("all"):
+                self.body_canvas.yview_scroll(step, "units")
 
         self.main_container.bind("<Configure>", update_scroll_region)
         self.body_canvas.bind("<Configure>", resize_body)
         self.body_canvas.bind_all("<MouseWheel>", scroll_body)
+        self.body_canvas.bind_all("<Button-4>", lambda event: scroll_body(event, -1))
+        self.body_canvas.bind_all("<Button-5>", lambda event: scroll_body(event, 1))
 
         # 1. Header Frame
         header = tk.Frame(self.main_container, bg="#1a1a1a")
@@ -1182,7 +1356,7 @@ class MediaGrabberApp:
         self.custom_name_var = tk.StringVar()
         self.custom_name_entry = tk.Entry(name_frame, textvariable=self.custom_name_var, font=("Segoe UI", 9), bg="#1e1e1e", fg="#ffffff", insertbackground="#ffffff", relief="flat", bd=0)
         self.custom_name_entry.pack(side="left", fill="x", expand=True, ipady=4, padx=(0, 7))
-        tk.Button(name_frame, text="Obtener título", font=("Segoe UI", 8), bg="#383838", fg="#ffffff", activebackground="#4a4a4a", activeforeground="#ffffff", relief="flat", bd=0, padx=8, command=self.load_title_async).pack(side="right")
+        tk.Button(name_frame, text="Obtener título", font=("Segoe UI", 8), bg="#383838", fg="#ffffff", activebackground="#4a4a4a", activeforeground="#ffffff", relief="flat", bd=0, padx=8, command=lambda: self.load_title_async(force=True)).pack(side="right")
 
         # 4. Action & Progress Panel
         action_frame = tk.Frame(self.bottom_container, bg="#1a1a1a")
@@ -1264,23 +1438,35 @@ class MediaGrabberApp:
         if f:
             self.folder_var.set(f)
             self.settings["download_folder"] = f
-            save_settings(SETTINGS_PATH, self.settings)
+            try:
+                save_settings(SETTINGS_PATH, self.settings)
+            except OSError:
+                pass
 
-    def load_title_async(self):
+    def load_title_async(self, force=False):
         urls = [u.strip() for u in self.url_input.get("1.0", tk.END).splitlines() if u.strip()]
-        if len(urls) != 1 or has_playlist_reference(urls[0]) or not urls[0].startswith("http"):
+        current_name = self.custom_name_var.get().strip()
+        auto_val = getattr(self, "_auto_title_value", None)
+        is_auto = bool(auto_val and current_name == auto_val)
+        if len(urls) != 1 or has_playlist_reference(urls[0]) or not is_valid_http_url(urls[0]) or unsupported_download_reason(urls[0]):
             self.title_lookup_url = None
-            self.custom_name_var.set("")
+            if force or current_name == "Obteniendo título…" or is_auto:
+                self.custom_name_var.set("")
+                self._auto_title_value = None
             return
         url = urls[0]
-        if url == self.title_lookup_url and self.custom_name_var.get().strip():
+        if not force and url == self.title_lookup_url and current_name:
+            return
+        if not force and current_name and current_name != "Obteniendo título…" and not is_auto:
+            self.title_lookup_url = url
             return
         self.title_lookup_url = url
+        self._auto_title_value = None
         self.custom_name_var.set("Obteniendo título…")
 
         def worker():
             try:
-                with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True}) as ydl:
+                with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True, "socket_timeout": 15}) as ydl:
                     info = ydl.extract_info(url, download=False)
                 title = (info or {}).get("title") or ""
             except Exception:
@@ -1291,6 +1477,9 @@ class MediaGrabberApp:
 
     def clear_urls(self):
         self.url_input.delete("1.0", tk.END)
+        self.title_lookup_url = None
+        self._auto_title_value = None
+        self.custom_name_var.set("")
 
     def clear_log(self):
         self.terminal.configure(state='normal')
@@ -1333,7 +1522,7 @@ class MediaGrabberApp:
         return targets
 
     def on_download(self):
-        global IS_DOWNLOADING
+        global IS_DOWNLOADING, CANCEL_REQUESTED
         if IS_DOWNLOADING:
             return
 
@@ -1345,10 +1534,7 @@ class MediaGrabberApp:
         urls = [u.strip() for u in urls_text.splitlines() if u.strip()]
         
         # Verify URLs
-        invalid_urls = []
-        for u in urls:
-            if not u.startswith("http"):
-                invalid_urls.append(u)
+        invalid_urls = [u for u in urls if not is_valid_http_url(u)]
         
         if invalid_urls:
             messagebox.showerror("Enlaces Inválidos", 
@@ -1384,6 +1570,8 @@ class MediaGrabberApp:
         if download_targets is None:
             self.lbl_status.configure(text="Descarga cancelada.", fg="#F9C846")
             return
+        if IS_DOWNLOADING:
+            return
         if clip_range:
             download_targets = apply_clip_to_targets(
                 download_targets, clip_range[0], clip_range[1]
@@ -1393,14 +1581,36 @@ class MediaGrabberApp:
         if not output_dir:
             output_dir = DEFAULT_FOLDER
             self.folder_var.set(output_dir)
-        os.makedirs(output_dir, exist_ok=True)
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror("Carpeta no válida", f"No se pudo acceder o crear la carpeta de destino:\n\n{output_dir}\n\n{exc}")
+            return
         self.settings["download_folder"] = output_dir
-        save_settings(SETTINGS_PATH, self.settings)
+        try:
+            save_settings(SETTINGS_PATH, self.settings)
+        except OSError:
+            pass
 
-        if len(download_targets) == 1:
-            custom_name = sanitize_output_name(self.custom_name_var.get())
-            if custom_name and custom_name != "Obteniendo título…":
+        if len(download_targets) == 1 and not download_targets[0].get("allow_playlist"):
+            raw_custom = self.custom_name_var.get().strip()
+            auto_val = getattr(self, "_auto_title_value", None)
+            if download_targets[0]["url"] != getattr(self, "title_lookup_url", None):
+                self.title_lookup_url = None
+                if raw_custom == "Obteniendo título…" or (auto_val and raw_custom == auto_val):
+                    self.custom_name_var.set("")
+                    self._auto_title_value = None
+                    raw_custom = ""
+            custom_name = sanitize_output_name(raw_custom)
+            if custom_name and raw_custom != "Obteniendo título…":
                 download_targets[0]["custom_name"] = custom_name
+        else:
+            self.title_lookup_url = None
+            raw_custom = self.custom_name_var.get().strip()
+            auto_val = getattr(self, "_auto_title_value", None)
+            if raw_custom == "Obteniendo título…" or (auto_val and raw_custom == auto_val):
+                self.custom_name_var.set("")
+                self._auto_title_value = None
 
         fmt = self.fmt_var.get()
         video_quality = self.quality_var.get()
@@ -1429,16 +1639,28 @@ class MediaGrabberApp:
         self.log_to_terminal(f"🔗 Total elementos preparados: {len(download_targets)}\n", "normal")
 
         # Spawn download background thread
-        t = threading.Thread(
-            target=run_downloads_thread,
-            args=(download_targets, output_dir, fmt, video_quality, include_audio),
-            daemon=True,
-        )
-        t.start()
+        IS_DOWNLOADING = True
+        CANCEL_REQUESTED = False
+        self.btn_download.configure(state="disabled")
+        try:
+            t = threading.Thread(
+                target=run_downloads_thread,
+                args=(download_targets, output_dir, fmt, video_quality, include_audio),
+                daemon=True,
+            )
+            t.start()
+        except Exception:
+            IS_DOWNLOADING = False
+            self.btn_download.configure(state="normal")
+            raise
 
     def on_cancel(self):
         global CANCEL_REQUESTED
+        if not IS_DOWNLOADING:
+            return
         if messagebox.askyesno("Confirmar Cancelación", "¿Estás seguro de que quieres cancelar la descarga actual?"):
+            if not IS_DOWNLOADING:
+                return
             CANCEL_REQUESTED = True
             self.btn_cancel.configure(state="disabled")
             self.lbl_status.configure(text="Cancelando descarga...", fg="#F9C846")
@@ -1446,87 +1668,103 @@ class MediaGrabberApp:
 
     # --- Thread Safe Queue Checker Loop ---
     def check_queue(self):
-        while not ui_queue.empty():
-            try:
-                msg = ui_queue.get_nowait()
-            except queue.Empty:
-                break
+        try:
+            while not ui_queue.empty():
+                try:
+                    msg = ui_queue.get_nowait()
+                except queue.Empty:
+                    break
 
-            m_type = msg.get('type')
-            
-            if m_type == 'start':
-                self.btn_download.configure(state='disabled')
-                self.btn_cancel.configure(state='normal')
-                self.progress_bar['value'] = 0
-                self.lbl_status.configure(text="Iniciando descargas...", fg="#ffffff")
+                m_type = msg.get('type')
 
-            elif m_type == 'detected_title':
-                if msg.get('url') == self.title_lookup_url:
-                    self.custom_name_var.set(msg.get('title') or "")
+                if m_type == 'start':
+                    self.btn_download.configure(state='disabled')
+                    self.btn_cancel.configure(state='normal')
+                    self.progress_bar['value'] = 0
+                    self.lbl_status.configure(text="Iniciando descargas...", fg="#ffffff")
 
-            elif m_type == 'youtube_login_opened':
-                messagebox.showinfo(
-                    "Inicia sesión en YouTube",
-                    "AveDescargas ha abierto una ventana especial de Chrome.\n\n"
-                    "Inicia sesión en YouTube y después cierra completamente esa ventana. "
-                    "La descarga continuará automáticamente.",
-                )
-                
-            elif m_type == 'active_url':
-                idx = msg.get('index') + 1
-                url = msg.get('url')
-                platform = msg.get('platform').upper()
-                self.log_to_terminal(f"📥 [{idx}] Descargando ({platform}): {url}", "normal")
-                self.lbl_status.configure(text=f"Procesando enlace {idx}...", fg="#ffffff")
-                self.progress_bar['value'] = 0
-                
-            elif m_type == 'progress':
-                percent = msg.get('percent', 0.0)
-                percent_str = msg.get('percent_str', '')
-                speed = msg.get('speed', '')
-                eta = msg.get('eta', '')
-                
-                self.progress_bar['value'] = percent
-                self.lbl_status.configure(text=f"Descargando: {percent_str} | Velocidad: {speed} | Tiempo restante: {eta}", fg="#0078d4")
-                
-            elif m_type == 'finished_download':
-                fname = msg.get('filename')
-                self.log_to_terminal(f"  ✅ Descarga completa: {fname}", "success")
-                self.lbl_status.configure(text="Procesando/Convirtiendo archivo...", fg="#2EA043")
-                
-            elif m_type == 'log':
-                text = msg.get('text')
-                level = msg.get('level')
-                self.log_to_terminal(text, level)
-                
-            elif m_type == 'complete':
-                ok = msg.get('ok_count')
-                err = msg.get('err_count')
-                cancelled = msg.get('cancelled')
-                
-                self.progress_bar['value'] = 100 if (ok > 0 and not cancelled) else 0
-                
-                if cancelled:
-                    self.log_to_terminal("\n🛑 Descargas canceladas por el usuario.", "warning")
-                    self.lbl_status.configure(text="Operación cancelada.", fg="#F9C846")
-                    messagebox.showinfo("Cancelado", "Las descargas han sido canceladas por el usuario.")
-                else:
-                    self.log_to_terminal(f"\n✨ ¡Finalizado! Descargas completadas: {ok} | Errores: {err}", "success" if err == 0 else "warning")
-                    self.lbl_status.configure(text=f"¡Terminado! {ok} exitosas, {err} errores.", fg="#2EA043" if err == 0 else "#F9C846")
-                    messagebox.showinfo("Proceso Terminado", f"¡Descargas terminadas!\n\nExitosas: {ok}\nErrores: {err}")
-                    
-                self.btn_download.configure(state='normal')
-                self.btn_cancel.configure(state='disabled')
-                
-                # Run temporary files cleanup
-                folder = self.folder_var.get().strip()
-                if os.path.exists(folder):
-                    deleted = clean_folder(folder)
-                    if deleted > 0:
-                        self.log_to_terminal(f"🧹 Limpieza: Se eliminaron {deleted} archivos temporales.", "normal")
+                elif m_type == 'detected_title':
+                    if msg.get('url') == self.title_lookup_url:
+                        auto_val = getattr(self, "_auto_title_value", None)
+                        current = self.custom_name_var.get().strip()
+                        if current in ("", "Obteniendo título…") or (auto_val and current == auto_val):
+                            detected = msg.get('title') or ""
+                            self._auto_title_value = detected or None
+                            self.custom_name_var.set(detected)
 
-        # Repeat check every 100ms
-        self.root.after(100, self.check_queue)
+                elif m_type == 'youtube_login_opened':
+                    messagebox.showinfo(
+                        "Inicia sesión en YouTube",
+                        "AveDescargas ha abierto una ventana especial de Chrome.\n\n"
+                        "Inicia sesión en YouTube y después cierra completamente esa ventana. "
+                        "La descarga continuará automáticamente.",
+                    )
+
+                elif m_type == 'active_url':
+                    idx = (msg.get('index') or 0) + 1
+                    url = msg.get('url') or ''
+                    platform = (msg.get('platform') or 'general').upper()
+                    self.log_to_terminal(f"📥 [{idx}] Descargando ({platform}): {url}", "normal")
+                    self.lbl_status.configure(text=f"Procesando enlace {idx}...", fg="#ffffff")
+                    self.progress_bar['value'] = 0
+
+                elif m_type == 'progress':
+                    try:
+                        percent = float(msg.get('percent') or 0.0)
+                    except (TypeError, ValueError):
+                        percent = 0.0
+                    if not math.isfinite(percent):
+                        percent = 0.0
+                    percent = max(0.0, min(100.0, percent))
+                    percent_str = msg.get('percent_str') or ''
+                    speed = msg.get('speed') or ''
+                    eta = msg.get('eta') or ''
+
+                    self.progress_bar['value'] = percent
+                    self.lbl_status.configure(text=f"Descargando: {percent_str} | Velocidad: {speed} | Tiempo restante: {eta}", fg="#0078d4")
+
+                elif m_type == 'finished_download':
+                    fname = msg.get('filename') or ''
+                    self.log_to_terminal(f"  ✅ Descarga completa: {fname}", "success")
+                    self.lbl_status.configure(text="Procesando/Convirtiendo archivo...", fg="#2EA043")
+
+                elif m_type == 'log':
+                    text = msg.get('text') or ''
+                    level = msg.get('level') or 'normal'
+                    self.log_to_terminal(text, level)
+
+                elif m_type == 'complete':
+                    ok = msg.get('ok_count') or 0
+                    err = msg.get('err_count') or 0
+                    cancelled = bool(msg.get('cancelled'))
+
+                    self.progress_bar['value'] = 100 if (ok > 0 and not cancelled) else 0
+
+                    if cancelled:
+                        self.log_to_terminal("\n🛑 Descargas canceladas por el usuario.", "warning")
+                        self.lbl_status.configure(text="Operación cancelada.", fg="#F9C846")
+                        messagebox.showinfo("Cancelado", "Las descargas han sido canceladas por el usuario.")
+                    else:
+                        self.log_to_terminal(f"\n✨ ¡Finalizado! Descargas completadas: {ok} | Errores: {err}", "success" if err == 0 else "warning")
+                        self.lbl_status.configure(text=f"¡Terminado! {ok} exitosas, {err} errores.", fg="#2EA043" if err == 0 else "#F9C846")
+                        messagebox.showinfo("Proceso Terminado", f"¡Descargas terminadas!\n\nExitosas: {ok}\nErrores: {err}")
+
+                    self.btn_download.configure(state='normal')
+                    self.btn_cancel.configure(state='disabled')
+
+                    # Run temporary files cleanup
+                    folder = self.folder_var.get().strip()
+                    if os.path.exists(folder):
+                        deleted = clean_folder(folder)
+                        if deleted > 0:
+                            self.log_to_terminal(f"🧹 Limpieza: Se eliminaron {deleted} archivos temporales.", "normal")
+        finally:
+            winfo_exists = getattr(self.root, "winfo_exists", None)
+            if not callable(winfo_exists) or winfo_exists():
+                try:
+                    self._queue_after_id = self.root.after(100, self.check_queue)
+                except tk.TclError:
+                    pass
 
 
 if __name__ == "__main__":
@@ -1539,7 +1777,11 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-    root = tk.Tk()
+    try:
+        from tkinterdnd2 import TkinterDnD
+        root = TkinterDnD.Tk()
+    except Exception:
+        root = tk.Tk()
     app = MediaGrabberApp(root)
     root.mainloop()
 

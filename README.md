@@ -2,16 +2,18 @@
 
 **Descargador de medios y editor multipista para Windows**, construido con Python y Tkinter.
 
-> Proyecto personal en desarrollo. La interfaz y algunas funciones pueden cambiar entre versiones. Consulta [Releases](https://github.com/Avesthyle/AveDescargas/releases) para obtener las versiones publicadas.
+> Proyecto personal en desarrollo. La interfaz y algunas funciones pueden cambiar entre versiones. Consulta **[Releases](https://github.com/Avesthyle/AveDescargas/releases)** para obtener las versiones publicadas (`AveDescargasEditor-portable.zip` incluye FFmpeg: descomprimir y abrir `AveDescargasEditor.exe`).
 
 ## Funciones
 
-- Descarga de vídeo y audio con selección de calidad y carpeta.
-- Selección de un fragmento y controles de audio para vídeo.
-- Aviso para enlaces que apuntan a listas de reproducción.
-- Editor multipista para organizar clips de audio y vídeo.
-- Recorte no destructivo, forma de onda, vista previa, ajuste entre clips y exportación con FFmpeg.
-- Reproducción desde el cabezal de edición y controles de teclado.
+- Descarga de vídeo y audio con selección de calidad, fragmentos y carpeta.
+- Aviso e importación selectiva para enlaces que apuntan a listas de reproducción.
+- Editor multipista con imán (los clips se pegan solos a otros clips y al cabezal), recorte de bordes, altura de pistas ajustable, cierre de huecos, pista principal magnética y deshacer/rehacer.
+- Recorte no destructivo, forma de onda, vista previa y exportación multipista con FFmpeg.
+- Reproducción desde el cabezal de edición y atajos de teclado.
+- Guía completa y atajos del editor: **[docs/EDITOR.md](docs/EDITOR.md)**.
+
+![Editor](docs/img/02_iman_guia.png)
 
 La disponibilidad de formatos de descarga depende del sitio y de sus condiciones. Utiliza la aplicación únicamente con contenido que tengas derecho a descargar.
 
@@ -19,7 +21,7 @@ La disponibilidad de formatos de descarga depende del sitio y de sus condiciones
 
 - Windows 10/11 de 64 bits.
 - Python 3.12 o posterior para ejecutar desde el código.
-- FFmpeg, FFprobe y FFplay accesibles en el PATH o en una ubicación detectada por la aplicación.
+- FFmpeg, FFprobe y FFplay accesibles en el PATH, en `C:\ffmpeg\bin` o en una carpeta `ffmpeg\bin` junto al ejecutable.
 - Conexión a Internet para las funciones de descarga.
 
 ## Puesta en marcha desde código
@@ -28,16 +30,16 @@ La disponibilidad de formatos de descarga depende del sitio y de sus condiciones
 git clone https://github.com/Avesthyle/AveDescargas.git
 cd AveDescargas
 py -3 -m venv .venv
-.venv\\Scripts\\Activate.ps1
+.venv\Scripts\Activate.ps1
 py -m pip install --upgrade pip
-py -m pip install yt-dlp Pillow numpy psutil tkinterdnd2
-py media_grabber_editor.py
+py -m pip install -r requirements.txt
+py -3 media_grabber_editor.py
 ```
 
 ## Pruebas
 
 ```powershell
-py -3 -m unittest test_media_editor.py test_media_grabber.py
+py -3 -m unittest test_magnetic_timeline test_media_editor test_media_grabber test_editor_panel_gui
 ```
 
 ## Compilar el editor
@@ -48,11 +50,11 @@ Instala PyInstaller con `py -m pip install pyinstaller` y ejecuta:
 py -m PyInstaller --noconfirm AveDescargasEditor.spec
 ```
 
-El resultado se genera en `dist/AveDescargasEditor.exe`.
+El resultado se genera en `dist/AveDescargasEditor.exe` (GitHub Actions también lo compila automáticamente en cada push; ver [`.github/workflows/build-windows.yml`](.github/workflows/build-windows.yml)).
 
 ## ¿Es portable el EXE?
 
-Es un ejecutable de archivo único de PyInstaller y no requiere instalar Python por separado. Sin embargo, **no es completamente autónomo**: FFmpeg, FFprobe y FFplay deben estar instalados o en una ubicación que detecte el programa, y las descargas necesitan Internet. En el primer inicio, PyInstaller puede extraer componentes temporales en la carpeta temporal de Windows.
+El `.exe` suelto es un ejecutable de archivo único de PyInstaller y no requiere instalar Python por separado, aunque necesita FFmpeg en el equipo (por eso se publica también `AveDescargasEditor-portable.zip` con FFmpeg incluido). En el primer inicio, PyInstaller puede extraer componentes temporales en la carpeta temporal de Windows.
 
 ## Estructura
 
@@ -64,6 +66,7 @@ Es un ejecutable de archivo único de PyInstaller y no requiere instalar Python 
 | `media_grabber_editor.py` | Punto de entrada de la aplicación |
 | `editor_panel.py` | Panel de edición alternativo |
 | `AveDescargasEditor.spec` | Configuración de PyInstaller |
+| `AGENTS.md` / `TAREAS.md` | Guía técnica del proyecto y registro de rondas |
 | `test_*.py` | Pruebas automatizadas |
 
 ## Informar de un problema
