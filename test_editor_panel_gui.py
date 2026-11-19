@@ -1926,6 +1926,77 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_ronda30_split_link_group_fade_clamp_clip_at_playhead_and_play_done(self):
+        root = tk.Tk()
+        root.geometry("1200x800+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            vm = MediaInfo("v.mp4", 10.0, True, True, 640, 360, 30.0)
+            am = audio_media_from_video(vm)
+
+            # 1. split_at_playhead y cut_selected_clip no dejan link_group suelto cuando la pareja no cubre el corte
+            v1 = Clip(vm, 0.0, 6.0, 0.0, use_source_audio=False, link_group="grp1")
+            a1 = Clip(am, 0.0, 2.0, 0.0, link_group="grp1")
+            panel.project.tracks[0].clips = [v1]
+            panel.project.tracks[1].clips = [a1]
+            panel.selected_clip = v1
+            panel.playhead_timeline = 4.0
+            panel.split_at_playhead()
+            self.assertEqual(panel.project.tracks[0].clips[0].link_group, "grp1")
+            self.assertIsNone(panel.project.tracks[0].clips[1].link_group)
+
+            # Igual con cut_selected_clip
+            panel.undo()
+            v1 = panel.project.tracks[0].clips[0]
+            panel.selected_clip = v1
+            panel.selected_media = v1.media
+            panel.cursor_time = 4.0
+            panel.cut_selected_clip()
+            self.assertEqual(panel.project.tracks[0].clips[0].link_group, "grp1")
+            self.assertIsNone(panel.project.tracks[0].clips[1].link_group)
+
+            # 2. _preview_fade_filters limita rem_out a (duration - st_out) al reproducir mitad del fade-out
+            fade_clip = Clip(vm, 0.0, 10.0, 0.0, fade_out=2.0)
+            filters = SimpleEditorPanel._preview_fade_filters(fade_clip, start=9.0, duration=1.0, is_audio=False)
+            self.assertEqual(filters, ["fade=t=out:st=0.000:d=1.000"])
+
+            # 3. _clip_at_playhead prioriza pista de audio audible sobre pista muteada
+            panel.project.tracks[0].clips = []
+            a_track1 = panel.project.tracks[1]
+            a_track2 = panel.add_track("audio", select=False)
+            a_track2.muted = True
+            c_audible = Clip(am, 0.0, 4.0, 0.0)
+            c_muted = Clip(am, 0.0, 4.0, 0.0)
+            a_track1.clips = [c_audible]
+            a_track2.clips = [c_muted]
+            found_track, found_clip = panel._clip_at_playhead(at_time=1.0)
+            self.assertIs(found_track, a_track1)
+            self.assertIs(found_clip, c_audible)
+
+            # 4. play_done sin siguiente clip avanza cabezal al final del clip reproducido
+            panel.project.tracks.pop()
+            a_track1.clips = [Clip(am, 1.0, 5.0, 2.0)]
+            c_last = a_track1.clips[0]
+            panel.selected_clip = c_last
+            panel.selected_media = am
+            panel._playback_from_timeline = True
+            panel.playing = True
+            panel.playback_end_time = 5.0
+            panel.frame_token = 42
+            panel.ui_queue.put(("play_done", 42))
+            panel._poll_queue()
+            self.assertAlmostEqual(panel.cursor_time, 5.0)
+            self.assertAlmostEqual(panel.playhead_timeline, 6.0)
+            self.assertIn("00:06.00", panel.timecode_var.get())
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

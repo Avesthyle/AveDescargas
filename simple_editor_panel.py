@@ -731,15 +731,19 @@ class SimpleEditorPanel(tk.Frame):
             self.status.configure(text="Coloca el cabezal dentro de un clip para dividirlo (S).", fg=YELLOW)
             return
         self._push_undo()
-        group_map = {}
+        group_counts = {}
         for clip in targets:
-            if clip.link_group and clip.link_group not in group_map:
-                group_map[clip.link_group] = self._next_link_group(clip.link_group)
+            if clip.link_group:
+                group_counts[clip.link_group] = group_counts.get(clip.link_group, 0) + 1
+        group_map = {
+            group: self._next_link_group(group)
+            for group, count in group_counts.items()
+            if count > 1
+        }
         for clip in targets:
             track = self._track_of(clip)
             left, right = split_clip(clip, time_point)
-            if clip.link_group:
-                right.link_group = group_map[clip.link_group]
+            right.link_group = group_map.get(clip.link_group) if clip.link_group else None
             index = self._clip_index(track, clip)
             track.clips[index:index + 1] = [left, right]
             if clip is self.selected_clip:
@@ -1642,15 +1646,23 @@ class SimpleEditorPanel(tk.Frame):
             messagebox.showerror("Error al capturar", str(exc))
 
     def _clip_at_playhead(self, at_time=None):
-        """Busca primero en pistas de vídeo activas (de arriba abajo) y luego en audio."""
+        """Busca primero en pistas de vídeo activas (de arriba abajo) y luego en audio audible."""
         pos = self.playhead_timeline if at_time is None else float(at_time)
-        ordered = [t for t in reversed(self.project.tracks) if t.enabled and t.kind == "video"]
-        ordered += [t for t in reversed(self.project.tracks) if t.enabled and t.kind == "audio"]
-        for track in ordered:
+        video_tracks = [t for t in reversed(self.project.tracks) if t.enabled and t.kind == "video"]
+        audio_tracks = [t for t in reversed(self.project.tracks) if t.enabled and t.kind == "audio"]
+        for track in video_tracks:
             for clip in track.clips:
                 if timeline_to_source_time(clip, pos) is not None:
                     return track, clip
-        return None, None
+        fallback = None
+        for track in audio_tracks:
+            for clip in track.clips:
+                if timeline_to_source_time(clip, pos) is not None:
+                    if not track.muted and clip.use_source_audio:
+                        return track, clip
+                    if fallback is None:
+                        fallback = (track, clip)
+        return fallback if fallback is not None else (None, None)
 
     def _update_timecode(self):
         total = self.project.duration()
@@ -1787,14 +1799,14 @@ class SimpleEditorPanel(tk.Frame):
             fade_in_end = clip_ref.source_in + d_in
             if start < fade_in_end - 1e-4:
                 st_in = max(0.0, clip_ref.source_in - start)
-                rem_in = min(duration, fade_in_end - max(start, clip_ref.source_in))
+                rem_in = min(max(0.0, duration - st_in), fade_in_end - max(start, clip_ref.source_in))
                 if rem_in > 0.01:
                     filters.append(f"{prefix}=t=in:st={st_in:.3f}:d={rem_in:.3f}")
         if d_out > 0:
             fade_out_start = clip_ref.source_out - d_out
             if start + duration > fade_out_start + 1e-4:
                 st_out = max(0.0, fade_out_start - start)
-                rem_out = min(d_out, (start + duration) - fade_out_start)
+                rem_out = min(d_out, max(0.0, duration - st_out), (start + duration) - fade_out_start)
                 if rem_out > 0.01:
                     filters.append(f"{prefix}=t=out:st={st_out:.3f}:d={rem_out:.3f}")
         return filters
@@ -2091,18 +2103,20 @@ class SimpleEditorPanel(tk.Frame):
             self.status.configure(text="La cuchilla debe estar dentro del clip, no en sus extremos.", fg=YELLOW)
             return
         self._push_undo()
-        new_group = self._next_link_group(clip.link_group) if clip.link_group else None
+        split_linked = []
         for linked in self._linked_clips(clip):
             linked_pieces = split_clip(linked, timeline_cut)
             linked_track = self._track_of(linked)
             if linked_pieces and linked_track:
-                if new_group:
-                    linked_pieces[1].link_group = new_group
-                index = self._clip_index(linked_track, linked)
-                if index is not None:
-                    linked_track.clips[index:index + 1] = list(linked_pieces)
-        if new_group:
-            pieces[1].link_group = new_group
+                split_linked.append((linked, linked_track, linked_pieces))
+        new_group = self._next_link_group(clip.link_group) if (clip.link_group and split_linked) else None
+        for linked, linked_track, linked_pieces in split_linked:
+            if new_group:
+                linked_pieces[1].link_group = new_group
+            index = self._clip_index(linked_track, linked)
+            if index is not None:
+                linked_track.clips[index:index + 1] = list(linked_pieces)
+        pieces[1].link_group = new_group
         for track in self.project.tracks:
             index = self._clip_index(track, clip)
             if index is not None:
@@ -2114,6 +2128,7 @@ class SimpleEditorPanel(tk.Frame):
                 self._refresh_tracks()
                 self._update_inspector()
                 self.redraw_timeline()
+                self._request_clip_or_missing_preview(self.selected_clip, self.cursor_time)
                 self.status.configure(text=f"Clip dividido en {format_editor_time(timeline_cut)}.", fg=GREEN)
                 return
 
@@ -2767,6 +2782,11 @@ class SimpleEditorPanel(tk.Frame):
                             self.play_from_cursor()
                         else:
                             self._playback_from_timeline = False
+                            if prev_clip.media is self.selected_media:
+                                self.cursor_time = max(prev_clip.source_in, min(prev_clip.source_out, self.playback_end_time))
+                                self.playhead_timeline = prev_clip.timeline_start + (self.cursor_time - prev_clip.source_in)
+                                self._update_timecode()
+                                self.redraw_timeline()
                     else:
                         self._playback_from_timeline = False
                 elif kind == "play_error":
