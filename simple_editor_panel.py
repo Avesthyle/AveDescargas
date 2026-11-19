@@ -1176,9 +1176,9 @@ class SimpleEditorPanel(tk.Frame):
         track = target_track or self.project.selected_track()
         if not track or track.kind != kind:
             track = next((t for t in self.project.tracks if t.kind == kind), None)
+        self._push_undo()
         if not track:
             track = self.add_track(kind, record_undo=False)
-        self._push_undo()
         pasted = copy.deepcopy(self.clipboard_clip)
         wanted = self.playhead_timeline if at_time is None else float(at_time)
         ranges = [(c.timeline_start, c.timeline_end) for c in track.clips]
@@ -1194,11 +1194,7 @@ class SimpleEditorPanel(tk.Frame):
         self._refresh_tracks()
         self._update_inspector()
         self.redraw_timeline()
-        if pasted.media.has_video and os.path.isfile(pasted.media.path):
-            self.request_frame(self.cursor_time)
-        elif not pasted.media.has_video:
-            self.preview_photo = None
-            self.preview.configure(image="", text=f"♫  {pathlib.Path(pasted.media.path).name}")
+        self._request_clip_or_missing_preview(pasted, self.cursor_time)
         self.status.configure(text=f"Pegado: {pasted.name}", fg=GREEN)
 
     def duplicate_clip(self):
@@ -1415,7 +1411,8 @@ class SimpleEditorPanel(tk.Frame):
         raw_start = self._time_at_x(self.timeline.canvasx(event.x))
         added = []
         for media in compatible:
-            clip = Clip(media, timeline_start=raw_start, name=pathlib.Path(media.path).stem)
+            clip_media = audio_media_from_video(media) if (track.kind == "audio" and media.has_video) else media
+            clip = Clip(clip_media, timeline_start=raw_start, name=pathlib.Path(media.path).stem)
             if self.snap_enabled.get():
                 points = collect_snap_points(self.project.tracks, playhead=self.playhead_timeline)
                 raw_start, _target = snap_timeline_position(raw_start, clip.duration, points, snap_threshold(self.zoom))
@@ -1471,9 +1468,9 @@ class SimpleEditorPanel(tk.Frame):
         track = self.project.selected_track()
         if not track or track.kind != kind:
             track = next((t for t in self.project.tracks if t.kind == kind), None)
+        self._push_undo()
         if not track:
             track = self.add_track(kind, record_undo=False)
-        self._push_undo()
         clip = Clip(media, timeline_start=self.playhead_timeline, name=pathlib.Path(media.path).stem)
         ranges = [(other.timeline_start, other.timeline_end) for other in track.clips]
         clip.timeline_start = round(avoid_clip_overlap(self.playhead_timeline, clip.duration, ranges), 6)
@@ -1487,11 +1484,7 @@ class SimpleEditorPanel(tk.Frame):
         self._refresh_tracks()
         self._update_inspector()
         self.redraw_timeline()
-        if media.has_video and os.path.isfile(media.path):
-            self.request_frame(clip.source_in)
-        elif not media.has_video:
-            self.preview_photo = None
-            self.preview.configure(image="", text=f"♫  {pathlib.Path(media.path).name}")
+        self._request_clip_or_missing_preview(clip, clip.source_in)
         self.status.configure(text=f"Añadido al timeline: {pathlib.Path(media.path).name}", fg=GREEN)
 
     def remove_selected_library_media(self):
@@ -2013,6 +2006,8 @@ class SimpleEditorPanel(tk.Frame):
         self.playing = True
         self.playback_started_at = time.monotonic()
         self.play_btn.configure(text="Ⅱ")
+        self.preview_photo = None
+        self.preview.configure(image="", text=f"♫  {pathlib.Path(media.path).name}")
         self.frame_token += 1
         token = self.frame_token
         if start is None or end is None:

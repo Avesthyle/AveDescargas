@@ -1868,6 +1868,64 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_ronda29_drop_audio_strips_video_audio_playback_clears_frame_and_paste_undo(self):
+        root = tk.Tk()
+        root.geometry("1200x800+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            # 1. _drop_library_media en pista de audio elimina has_video del clip
+            with tempfile.TemporaryDirectory() as tmp:
+                vp = os.path.join(tmp, "video.mp4")
+                ap = os.path.join(tmp, "song.mp3")
+                open(vp, "wb").close()
+                open(ap, "wb").close()
+                vm = MediaInfo(vp, 6.0, True, True, 640, 360, 30.0)
+                am = MediaInfo(ap, 6.0, False, True)
+                a_track = panel.project.tracks[1]
+                layout = panel._layout()
+                ay = int((layout[1][0] + layout[1][1]) / 2)
+                drop_event = type("Drop", (), {"x": 200, "y": ay})()
+                self.assertTrue(panel._drop_library_media(drop_event, media_list=[vm]))
+                self.assertEqual(len(a_track.clips), 1)
+                self.assertFalse(a_track.clips[0].media.has_video)
+
+                # 2. _play_audio_only limpia preview_photo previo y muestra nombre de audio
+                panel.preview_photo = object()
+                proc_mock = mock.Mock(poll=lambda: None, wait=lambda: 0)
+                with mock.patch("simple_editor_panel.discover_ffmpeg_tools", return_value=("ffmpeg", "ffprobe", "ffplay")), \
+                     mock.patch("simple_editor_panel.subprocess.Popen", return_value=proc_mock):
+                    panel._play_audio_only(am, 0.0, 2.0)
+                self.assertIsNone(panel.preview_photo)
+                self.assertEqual(panel.preview.cget("image"), "")
+                self.assertIn("song.mp3", panel.preview.cget("text"))
+                panel.stop_playback()
+
+            # 3. paste_clip crea snapshot antes de añadir pista faltante y limpia preview si archivo falta
+            del panel.project.tracks[1]
+            self.assertEqual(len(panel.project.tracks), 1)
+            panel.clipboard_clip = Clip(MediaInfo("/no/existe/clip.mp3", 4.0, False, True), 0.0, 4.0, 0.0)
+            panel.undo_stack.clear()
+            panel.paste_clip(at_time=0.0)
+            self.assertEqual(len(panel.project.tracks), 2)
+            self.assertEqual(len(panel.project.tracks[1].clips), 1)
+            panel.undo()
+            self.assertEqual(len(panel.project.tracks), 1)
+
+            vm_missing = MediaInfo("/no/existe/video_missing.mp4", 4.0, True, True, 640, 360, 30.0)
+            panel.clipboard_clip = Clip(vm_missing, 0.0, 4.0, 0.0)
+            panel.preview_photo = object()
+            panel.paste_clip(at_time=0.0)
+            self.assertIsNone(panel.preview_photo)
+            self.assertIn("Archivo no encontrado", panel.preview.cget("text"))
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
