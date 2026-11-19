@@ -441,8 +441,24 @@ class SimpleEditorPanel(tk.Frame):
         handler()
         return "break"
 
+    def _sync_media_listbox(self):
+        self.media_list.delete(0, "end")
+        missing_paths = getattr(self, "_missing_media_paths", set())
+        for media in self.media_library:
+            key = os.path.normcase(os.path.abspath(media.path))
+            is_missing = key in missing_paths and not os.path.isfile(media.path)
+            icon = "▶" if media.has_video else "♫"
+            suffix = " (no encontrado)" if is_missing else ""
+            self.media_list.insert("end", f"{icon}  {pathlib.Path(media.path).name}   ·   {format_editor_time(media.duration)}{suffix}")
+
     def _snapshot(self):
-        return copy.deepcopy((self.project.tracks, self.project.selected_track_index, self.track_heights))
+        return copy.deepcopy((
+            self.project.tracks,
+            self.project.selected_track_index,
+            self.track_heights,
+            self.media_library,
+            set(getattr(self, "_missing_media_paths", set())),
+        ))
 
     def _push_undo(self, snapshot=None):
         if not hasattr(self, "undo_btn"):
@@ -453,10 +469,28 @@ class SimpleEditorPanel(tk.Frame):
         self._update_undo_buttons()
 
     def _restore(self, snapshot):
-        tracks, selected_index, heights = copy.deepcopy(snapshot)
+        if len(snapshot) >= 5:
+            tracks, selected_index, heights, media_library, missing_paths = copy.deepcopy(snapshot)
+            prev_missing = getattr(self, "_missing_media_paths", set())
+            library_changed = (media_library != self.media_library) or (missing_paths != prev_missing)
+        else:
+            tracks, selected_index, heights = copy.deepcopy(snapshot)
+            library_changed = False
         self.project.tracks = tracks
         self.project.selected_track_index = selected_index
         self.track_heights = heights
+        if library_changed:
+            self.media_library = media_library
+            self._missing_media_paths = missing_paths
+            self._sync_media_listbox()
+            if self.selected_media is not None:
+                self.selected_media = next(
+                    (
+                        m for m in self.media_library
+                        if m.path == self.selected_media.path and m.has_video == self.selected_media.has_video
+                    ),
+                    None,
+                )
         self.selected_clip = None
         self.drag_clip = None
         self.drag_track = None
@@ -1129,6 +1163,7 @@ class SimpleEditorPanel(tk.Frame):
             self.volume_var.set(100)
             self.fade_in_var.set(0.0)
             self.fade_out_var.set(0.0)
+            self.inspector_audio_btn.configure(text="Audio original ON/OFF")
             self.unlink_btn.configure(text="Separar audio/vídeo")
             return
         self.clip_title_var.set(clip.name)
@@ -1505,6 +1540,7 @@ class SimpleEditorPanel(tk.Frame):
         if in_use:
             self.status.configure(text="No se puede quitar: este archivo tiene clips en la línea de tiempo.", fg=YELLOW)
             return
+        self._push_undo()
         self.media_library.pop(index)
         self.media_list.delete(index)
         if self.selected_media is media:

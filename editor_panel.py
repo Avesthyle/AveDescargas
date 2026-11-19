@@ -211,6 +211,7 @@ class EditorPanel(tk.Frame):
         if not paths:
             return
         self.status.configure(text="Analizando archivos…", fg=YELLOW)
+        imported = 0
         for path in paths:
             try:
                 media = probe_media(path)
@@ -220,9 +221,15 @@ class EditorPanel(tk.Frame):
                     track = self.add_track(kind)
                 start = max((clip.timeline_end for clip in track.clips), default=0.0)
                 track.clips.append(Clip(media, timeline_start=start))
+                imported += 1
             except Exception as exc:
                 messagebox.showerror("No se pudo importar", f"{path}\n\n{exc}")
-        self.status.configure(text="Medios importados.", fg=GREEN)
+        if imported == len(paths):
+            self.status.configure(text="Medios importados.", fg=GREEN)
+        elif imported > 0:
+            self.status.configure(text=f"Importados {imported} de {len(paths)} archivo(s).", fg=YELLOW)
+        else:
+            self.status.configure(text="No se pudo importar ningún archivo.", fg="#ff6b6b")
         self.refresh()
 
     def _select_track(self, _event=None):

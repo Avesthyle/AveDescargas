@@ -1997,6 +1997,56 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_ronda31_snapshot_restores_media_library_inspector_audio_reset_and_editor_import_status(self):
+        from editor_panel import EditorPanel
+
+        root = tk.Tk()
+        root.geometry("1200x800+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            # 1. remove_selected_library_media y load_project_dialog restauran media_library con Ctrl+Z / Ctrl+Y
+            am = MediaInfo("/tmp/song_r31.mp3", 4.0, False, True)
+            panel.media_library = [am]
+            panel._sync_media_listbox()
+            panel.media_list.selection_set(0)
+            panel.remove_selected_library_media()
+            self.assertEqual(len(panel.media_library), 0)
+            self.assertEqual(panel.media_list.size(), 0)
+            panel.undo()
+            self.assertEqual(len(panel.media_library), 1)
+            self.assertEqual(panel.media_list.size(), 1)
+            self.assertIn("song_r31.mp3", panel.media_list.get(0))
+            panel.redo()
+            self.assertEqual(len(panel.media_library), 0)
+
+            # 2. _update_inspector restablece inspector_audio_btn al deseleccionar clip
+            vc = Clip(MediaInfo("/tmp/v_r31.mp4", 6.0, True, True, 640, 360, 30.0), 0.0, 4.0, 0.0)
+            panel.project.tracks[0].clips = [vc]
+            panel.selected_clip = vc
+            panel._update_inspector()
+            self.assertEqual(panel.inspector_audio_btn.cget("text"), "Audio original ON")
+            panel.selected_clip = None
+            panel._update_inspector()
+            self.assertEqual(panel.inspector_audio_btn.cget("text"), "Audio original ON/OFF")
+
+            # 3. EditorPanel.import_media no muestra estado verde cuando todos los archivos fallan
+            ep = EditorPanel(root)
+            with mock.patch("editor_panel.filedialog.askopenfilenames", return_value=("/bad/file.mp4",)), \
+                 mock.patch("editor_panel.probe_media", side_effect=ValueError("dañado")), \
+                 mock.patch("editor_panel.messagebox.showerror") as err_mock:
+                ep.import_media()
+            err_mock.assert_called_once()
+            self.assertIn("No se pudo importar", ep.status.cget("text"))
+            ep.destroy()
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
