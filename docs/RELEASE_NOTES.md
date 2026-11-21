@@ -1,7 +1,9 @@
-## Línea de tiempo magnética
+## AveDescargas v1.0.0 — Editor multipista y línea de tiempo magnética
 
-**Descarga recomendada:** `AveDescargasEditor-portable.zip` (incluye FFmpeg, descomprimir y abrir).
-`AveDescargasEditor.exe` solo sirve si ya tienes FFmpeg instalado.
+**Descarga recomendada:** `AveDescargasEditor-v1.0.0-portable.zip` (incluye FFmpeg, descomprimir y abrir).
+`AveDescargasEditor-v1.0.0.exe` solo sirve si ya tienes FFmpeg instalado.
+
+Historial completo de versiones: [CHANGELOG.md](https://github.com/Avesthyle/AveDescargas/blob/main/CHANGELOG.md)
 
 ### Novedades
 - 🧲 **Imán**: al mover, recortar o cortar, los clips se pegan a otros clips (de cualquier pista), al cabezal y a 00:00, con una guía amarilla que indica a qué se enganchan. **Alt** = movimiento libre.

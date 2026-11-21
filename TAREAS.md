@@ -3,9 +3,9 @@
 > **Para conversaciones nuevas:** lee **solo hasta la línea `HISTORIAL ANTIGUO`** (aprox. las primeras 75 líneas). Debajo se guarda el índice histórico de rondas anteriores para no cargar contexto innecesario.
 
 ## Estado actual
-- **Rama activa:** `main` (Rondas 1–31 consolidadas + Ronda 32).
-- **Última ronda completada:** Ronda 32 — estado de audio en separación vinculada, confirmación de inspector al insertar/soltar medios y precisión de duración mínima en `EditorPanel`.
-- **Tests:** **189 tests en verde** (`unittest` bajo `xvfb-run`) y `pyflakes` limpio en los 5 módulos de producción.
+- **Rama activa:** `main` (Rondas 1–32 consolidadas · versión `v1.0.0`).
+- **Última ronda completada:** Ronda 32 + publicación de versión `v1.0.0` (`APP_VERSION` en ventana, ejecutables versionados y GitHub Release).
+- **Tests:** **190 tests en verde** (`unittest` bajo `xvfb-run`) y `pyflakes` limpio en los 5 módulos de producción.
 - **CI Windows (`Compilar para Windows`):** ejecución `#44469674403` (`success`, artefactos `AveDescargasEditor-exe` y `AveDescargasEditor-portable`).
 
 ## Pendientes / Próximas tareas

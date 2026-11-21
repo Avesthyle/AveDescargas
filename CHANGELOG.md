@@ -2,11 +2,16 @@
 
 Notable project changes are recorded here.
 
-## Unreleased
+## [1.0.0] - 2026-11-21
 
-- Initial public source repository established.
-- Added setup, test, build, portability, and contribution documentation.
+Primera versión ejecutable compilada y publicada en GitHub Releases (`AveDescargasEditor-v1.0.0.exe` y `AveDescargasEditor-v1.0.0-portable.zip`).
 
-## 0.1.0
+### Mejoras respecto a `0.1.0`
+- **Editor multipista visual (`SimpleEditorPanel`)**: visor con previsualización FFmpeg/FFplay, biblioteca de medios con arrastrar y soltar, inspector de volumen/fundidos/tono (`±12` semitonos) y guardado/carga de proyectos `.avep`.
+- **Línea de tiempo magnética**: imán con guía visual, pista principal magnética, cerrar hueco, eliminar y cerrar hueco (`Shift+Supr`), altura redimensionable por pista, zoom adaptativo, formas de onda en segundo plano y deshacer/rehacer (`Ctrl+Z` / `Ctrl+Y`).
+- **Descargador mejorado**: selector de playlists (vídeo suelto, playlist completa o selección), descarga por fragmentos, detección de títulos, validación estricta de URLs y nombres en Windows, reintentos con sesión en YouTube/Instagram y cancelación limpia.
+- **Estabilidad y pruebas**: 32 rondas de corrección de errores verificadas con 190 tests automáticos.
 
-- Initial source publication of AveDescargas and the multipista editor.
+## [0.1.0]
+
+- Publicación inicial del código fuente de AveDescargas y el editor multipista básico.

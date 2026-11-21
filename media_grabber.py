@@ -6,6 +6,8 @@ Uso: python media_grabber.py
 
 import os
 import sys
+
+APP_VERSION = "1.0.0"
 import re
 import json
 import math
@@ -1028,7 +1030,7 @@ class MediaGrabberApp:
         self.settings = load_settings(SETTINGS_PATH)
         self.title_lookup_url = None
         self._auto_title_value = None
-        self.root.title("AveDescargas — Descargador Universal")
+        self.root.title(f"AveDescargas v{APP_VERSION} — Descargador Universal")
         self.root.geometry("1100x720")
         self.root.minsize(650, 480)
         self.root.configure(bg="#1a1a1a")

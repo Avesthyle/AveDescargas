@@ -980,6 +980,17 @@ class PlaylistHandlingTests(unittest.TestCase):
             media_grabber.IS_DOWNLOADING = prev_downloading
             media_grabber.CANCEL_REQUESTED = prev_cancel
 
+    def test_window_title_includes_app_version(self):
+        import tkinter as tk
+        import media_grabber
+        root = tk.Tk()
+        try:
+            app = media_grabber.MediaGrabberApp(root)
+            self.assertIn(f"v{media_grabber.APP_VERSION}", root.title())
+            app.on_close()
+        except tk.TclError:
+            pass
+
 
 if __name__ == "__main__":
     unittest.main()
