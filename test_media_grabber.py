@@ -987,6 +987,12 @@ class PlaylistHandlingTests(unittest.TestCase):
         try:
             app = media_grabber.MediaGrabberApp(root)
             self.assertIn(f"v{media_grabber.APP_VERSION}", root.title())
+            self.assertEqual(app.fmt_var.get(), "mp4")
+            self.assertEqual(app.video_options_frame.winfo_manager(), "pack")
+            app.fmt_var.set("mp3")
+            self.assertEqual(app.video_options_frame.winfo_manager(), "")
+            app.fmt_var.set("mp4")
+            self.assertEqual(app.video_options_frame.winfo_manager(), "pack")
             app.on_close()
         except tk.TclError:
             pass

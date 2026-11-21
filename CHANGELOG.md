@@ -2,6 +2,12 @@
 
 Notable project changes are recorded here.
 
+## [1.0.1] - 2026-11-21
+
+### Mejoras respecto a `1.0.0`
+- **Selector deslizante de formato (`🎬 Vídeo` / `🎵 MP3`)**: sustituye los botones de radio por un interruptor deslizante más claro.
+- **Opciones de vídeo ocultables**: los controles de sonido (`Con sonido` / `Sin sonido`) y `Calidad de vídeo` se ocultan automáticamente cuando se selecciona `MP3` y solo aparecen al elegir `Vídeo`.
+
 ## [1.0.0] - 2026-11-21
 
 Primera versión ejecutable compilada y publicada en GitHub Releases (`AveDescargasEditor-v1.0.0.exe` y `AveDescargasEditor-v1.0.0-portable.zip`).

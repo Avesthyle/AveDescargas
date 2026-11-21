@@ -7,7 +7,7 @@ Uso: python media_grabber.py
 import os
 import sys
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 import re
 import json
 import math
@@ -1244,21 +1244,57 @@ class MediaGrabberApp:
         self.quality_var = tk.StringVar(value="1080p (Full HD)")
         self.video_audio_var = tk.StringVar(value="with_audio")
 
-        radio_container = tk.Frame(format_frame, bg="#262626")
-        radio_container.pack(anchor="w")
+        self.format_slider = tk.Canvas(
+            format_frame, width=216, height=32, bg="#262626", highlightthickness=0, bd=0, cursor="hand2"
+        )
+        self.format_slider.pack(anchor="w")
 
-        rb_mp4 = tk.Radiobutton(radio_container, text="🎬 MP4 Video", variable=self.fmt_var, value="mp4",
-                                font=("Segoe UI", 9), fg="#ffffff", bg="#262626", activebackground="#262626",
-                                activeforeground="#ffffff", selectcolor="#1e1e1e")
-        rb_mp4.pack(side="left", padx=(0, 10))
+        def _draw_format_slider(*_args):
+            c = self.format_slider
+            c.delete("all")
+            w, h = 216, 32
+            r = h // 2
+            # Fondo pill oscuro
+            c.create_oval(1, 1, h - 1, h - 1, fill="#1e1e1e", outline="#3a3a3a")
+            c.create_oval(w - h + 1, 1, w - 1, h - 1, fill="#1e1e1e", outline="#3a3a3a")
+            c.create_rectangle(r, 1, w - r, h - 1, fill="#1e1e1e", outline="#1e1e1e")
+            c.create_line(r, 1, w - r, 1, fill="#3a3a3a")
+            c.create_line(r, h - 1, w - r, h - 1, fill="#3a3a3a")
+            is_mp4 = self.fmt_var.get() == "mp4"
+            # Deslizador activo
+            x0, x1 = (3, w // 2 - 2) if is_mp4 else (w // 2 + 2, w - 3)
+            knob_color = "#0078d4" if is_mp4 else "#2EA043"
+            kh = h - 6
+            kr = kh // 2
+            c.create_oval(x0, 3, x0 + kh, 3 + kh, fill=knob_color, outline="")
+            c.create_oval(x1 - kh, 3, x1, 3 + kh, fill=knob_color, outline="")
+            c.create_rectangle(x0 + kr, 3, x1 - kr, 3 + kh, fill=knob_color, outline="")
+            c.create_text(
+                w * 0.25, h / 2, text="🎬 Vídeo",
+                fill="#ffffff" if is_mp4 else "#9a9a9a",
+                font=("Segoe UI", 9, "bold" if is_mp4 else "normal"),
+            )
+            c.create_text(
+                w * 0.75, h / 2, text="🎵 MP3",
+                fill="#ffffff" if not is_mp4 else "#9a9a9a",
+                font=("Segoe UI", 9, "bold" if not is_mp4 else "normal"),
+            )
 
-        rb_mp3 = tk.Radiobutton(radio_container, text="🎵 MP3 Audio", variable=self.fmt_var, value="mp3",
-                                font=("Segoe UI", 9), fg="#ffffff", bg="#262626", activebackground="#262626",
-                                activeforeground="#ffffff", selectcolor="#1e1e1e")
-        rb_mp3.pack(side="left")
+        def _on_slider_click(event):
+            target = "mp4" if event.x < 108 else "mp3"
+            if self.fmt_var.get() == target:
+                target = "mp3" if target == "mp4" else "mp4"
+            self.fmt_var.set(target)
 
-        sound_container = tk.Frame(format_frame, bg="#262626")
-        sound_container.pack(anchor="w", pady=(7, 0))
+        self.format_slider.bind("<Button-1>", _on_slider_click)
+        self._draw_format_slider = _draw_format_slider
+        self.fmt_var.trace_add("write", lambda *_a: self.update_video_option_state())
+
+        self.video_options_frame = tk.Frame(format_frame, bg="#262626")
+        self.video_options_frame.pack(anchor="w", fill="x", pady=(8, 0))
+
+        sound_container = tk.Frame(self.video_options_frame, bg="#262626")
+        sound_container.pack(anchor="w")
 
         self.rb_video_with_audio = tk.Radiobutton(
             sound_container, text="🔊 Con sonido", variable=self.video_audio_var,
@@ -1274,10 +1310,7 @@ class MediaGrabberApp:
         )
         self.rb_video_without_audio.pack(side="left")
 
-        rb_mp4.configure(command=self.update_video_option_state)
-        rb_mp3.configure(command=self.update_video_option_state)
-
-        quality_container = tk.Frame(format_frame, bg="#262626")
+        quality_container = tk.Frame(self.video_options_frame, bg="#262626")
         quality_container.pack(anchor="w", fill="x", pady=(8, 0))
 
         lbl_quality = tk.Label(quality_container, text="Calidad de vídeo:", font=("Segoe UI", 9, "bold"),
@@ -1430,10 +1463,19 @@ class MediaGrabberApp:
 
     # --- Actions ---
     def update_video_option_state(self):
-        state = "normal" if self.fmt_var.get() == "mp4" else "disabled"
+        is_video = self.fmt_var.get() == "mp4"
+        if hasattr(self, "_draw_format_slider"):
+            self._draw_format_slider()
+        state = "normal" if is_video else "disabled"
         self.rb_video_with_audio.configure(state=state)
         self.rb_video_without_audio.configure(state=state)
-        self.quality_combo.configure(state="readonly" if state == "normal" else "disabled")
+        self.quality_combo.configure(state="readonly" if is_video else "disabled")
+        if hasattr(self, "video_options_frame"):
+            if is_video:
+                if not self.video_options_frame.winfo_manager():
+                    self.video_options_frame.pack(anchor="w", fill="x", pady=(8, 0))
+            else:
+                self.video_options_frame.pack_forget()
 
     def select_folder(self):
         f = filedialog.askdirectory(initialdir=self.folder_var.get())
