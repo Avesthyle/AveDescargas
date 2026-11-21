@@ -1,11 +1,11 @@
-## AveDescargas v1.0.1 — Selector deslizante de formato
+## AveDescargas v1.0.2 — Separar y unir audio/vídeo con clic derecho
 
-**Descarga recomendada:** `AveDescargasEditor-v1.0.1-portable.zip` (incluye FFmpeg, descomprimir y abrir).
-`AveDescargasEditor-v1.0.1.exe` solo sirve si ya tienes FFmpeg instalado.
+**Descarga recomendada:** `AveDescargasEditor-v1.0.2-portable.zip` (incluye FFmpeg, descomprimir y abrir).
+`AveDescargasEditor-v1.0.2.exe` solo sirve si ya tienes FFmpeg instalado.
 
-### Mejoras respecto a `v1.0.0`
-- Selector deslizante `🎬 Vídeo` / `🎵 MP3` en la pestaña de descargas.
-- Las opciones de vídeo (`Con sonido` / `Sin sonido` y `Calidad de vídeo`) se ocultan al elegir `MP3` y solo se muestran al activar `Vídeo`.
+### Mejoras respecto a `v1.0.1`
+- Al añadir un vídeo entra unido en la pista de vídeo y, con **clic derecho** sobre el clip, puedes elegir **Separar audio y vídeo**.
+- Cuando el audio y el vídeo están separados, el **clic derecho** sobre cualquiera de los dos ofrece **Unir audio y vídeo** para volver a juntarlos en un único clip.
 
 Historial completo de versiones: [CHANGELOG.md](https://github.com/Avesthyle/AveDescargas/blob/main/CHANGELOG.md)
 

@@ -889,6 +889,12 @@ class SimpleEditorPanel(tk.Frame):
             menu.add_command(label="Eliminar y cerrar hueco    Shift+Supr", command=self.ripple_delete_clip)
             menu.add_separator()
             menu.add_command(label="Audio del clip ON/OFF", command=self.toggle_clip_audio)
+            if self._find_rejoin_pair(clip) is not None:
+                menu.add_command(label="Unir audio y vídeo", command=self.join_audio_video)
+                if clip.link_group:
+                    menu.add_command(label="Desvincular audio/vídeo", command=self.toggle_linked_media)
+            elif clip.media.has_video and clip.media.has_audio:
+                menu.add_command(label="Separar audio y vídeo", command=self.toggle_linked_media)
         else:
             if self.clipboard_clip is not None:
                 menu.add_command(label="Pegar aquí    Ctrl+V", command=lambda: self.paste_clip(time_point, track))
@@ -1023,6 +1029,82 @@ class SimpleEditorPanel(tk.Frame):
         while f"link-{idx}" in existing:
             idx += 1
         return f"link-{idx}"
+
+    def _find_rejoin_pair(self, clip):
+        if not clip:
+            return None
+        track = self._track_of(clip)
+        if not track:
+            return None
+        clip_key = os.path.normcase(os.path.abspath(clip.media.path))
+        if clip.link_group:
+            for other in self._linked_clips(clip):
+                other_track = self._track_of(other)
+                if not other_track:
+                    continue
+                if track.kind == "video" and other_track.kind == "audio" and clip.media.has_video and clip.media.has_audio:
+                    return clip, other
+                if track.kind == "audio" and other_track.kind == "video" and other.media.has_video and other.media.has_audio:
+                    return other, clip
+            return None
+        if track.kind == "video" and clip.media.has_video and clip.media.has_audio and not clip.use_source_audio:
+            for item in self.project.tracks:
+                if item.kind != "audio":
+                    continue
+                for other in item.clips:
+                    other_key = os.path.normcase(os.path.abspath(other.media.path))
+                    if (
+                        not other.link_group
+                        and other_key == clip_key
+                        and abs(other.timeline_start - clip.timeline_start) < 0.02
+                        and abs(other.source_in - clip.source_in) < 0.02
+                        and abs(other.duration - clip.duration) < 0.02
+                    ):
+                        return clip, other
+        elif track.kind == "audio" and not clip.media.has_video:
+            for item in self.project.tracks:
+                if item.kind != "video":
+                    continue
+                for other in item.clips:
+                    other_key = os.path.normcase(os.path.abspath(other.media.path))
+                    if (
+                        not other.link_group
+                        and other.media.has_video
+                        and other.media.has_audio
+                        and not other.use_source_audio
+                        and other_key == clip_key
+                        and abs(other.timeline_start - clip.timeline_start) < 0.02
+                        and abs(other.source_in - clip.source_in) < 0.02
+                        and abs(other.duration - clip.duration) < 0.02
+                    ):
+                        return other, clip
+        return None
+
+    def join_audio_video(self, clip=None):
+        self._commit_inspector_edits()
+        if self.playing:
+            self.stop_playback()
+        pair = self._find_rejoin_pair(clip or self.selected_clip)
+        if not pair:
+            return
+        v_clip, a_clip = pair
+        a_track = self._track_of(a_clip)
+        if not a_track:
+            return
+        self._push_undo()
+        v_clip.use_source_audio = a_clip.use_source_audio
+        v_clip.volume = a_clip.volume
+        v_clip.pitch_semitones = a_clip.pitch_semitones
+        v_clip.fade_in, v_clip.fade_out = clamp_fades(a_clip.fade_in, a_clip.fade_out, v_clip.duration)
+        v_clip.link_group = None
+        self._remove_clip_from_track(a_track, a_clip)
+        self.selected_clip = v_clip
+        self.selected_media = v_clip.media
+        self.keep_audio.set(v_clip.use_source_audio)
+        self._refresh_tracks()
+        self._update_inspector()
+        self.redraw_timeline()
+        self.status.configure(text="Audio y vídeo unidos de nuevo.", fg=GREEN)
 
     def toggle_linked_media(self):
         self._commit_inspector_edits()

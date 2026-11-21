@@ -7,7 +7,7 @@ Uso: python media_grabber.py
 import os
 import sys
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 import re
 import json
 import math

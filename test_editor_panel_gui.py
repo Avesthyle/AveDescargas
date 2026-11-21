@@ -2101,6 +2101,78 @@ class EditorEndToEndTests(unittest.TestCase):
             gc.collect()
             root.destroy()
 
+    def test_context_menu_separate_and_join_audio_video(self):
+        root = tk.Tk()
+        root.geometry("1200x800+0+0")
+        panel = SimpleEditorPanel(root)
+        panel.pack(fill="both", expand=True)
+        root.update_idletasks()
+        root.update()
+        try:
+            vm = MediaInfo("/tmp/v_join.mp4", 6.0, True, True, 640, 360, 30.0)
+            panel.media_library = [vm]
+            panel._sync_media_listbox()
+            panel.media_list.selection_set(0)
+            panel._insert_selected_media()
+            # Al añadir un vídeo entra unido en la pista de vídeo (sin crear clip separado en audio)
+            self.assertEqual(len(panel.project.tracks[0].clips), 1)
+            self.assertEqual(len(panel.project.tracks[1].clips), 0)
+            vc = panel.project.tracks[0].clips[0]
+            self.assertTrue(vc.use_source_audio)
+            self.assertIsNone(vc.link_group)
+
+            captured_labels = []
+            orig_menu = tk.Menu
+
+            class CaptureMenu(orig_menu):
+                def add_command(self, **kw):
+                    if "label" in kw:
+                        captured_labels.append(kw["label"])
+                    return super().add_command(**kw)
+
+                def tk_popup(self, *args, **kwargs):
+                    pass
+
+            panel.redraw_timeline()
+            cx = int(panel._x_at_time(1.0))
+            cy = int(sum(panel._layout()[0]) / 2)
+            event = type("Evt", (), {"x": cx, "y": cy, "x_root": 100, "y_root": 100})()
+            with mock.patch("simple_editor_panel.tk.Menu", CaptureMenu):
+                panel._timeline_context_menu(event)
+            self.assertIn("Separar audio y vídeo", captured_labels)
+            self.assertNotIn("Unir audio y vídeo", captured_labels)
+
+            # Separar audio y vídeo y modificar volumen en el clip de audio
+            panel.toggle_linked_media()
+            self.assertEqual(len(panel.project.tracks[1].clips), 1)
+            ac = panel.project.tracks[1].clips[0]
+            ac.volume = 0.65
+            ac.pitch_semitones = 2
+
+            captured_labels.clear()
+            with mock.patch("simple_editor_panel.tk.Menu", CaptureMenu):
+                panel._timeline_context_menu(event)
+            self.assertIn("Unir audio y vídeo", captured_labels)
+            self.assertNotIn("Separar audio y vídeo", captured_labels)
+
+            # Volver a unir desde el clip de audio
+            panel.selected_clip = ac
+            panel.join_audio_video()
+            self.assertEqual(len(panel.project.tracks[1].clips), 0)
+            self.assertTrue(vc.use_source_audio)
+            self.assertIsNone(vc.link_group)
+            self.assertAlmostEqual(vc.volume, 0.65)
+            self.assertEqual(vc.pitch_semitones, 2)
+
+            # Deshacer restaura el par separado
+            panel.undo()
+            self.assertEqual(len(panel.project.tracks[1].clips), 1)
+        finally:
+            panel.destroy()
+            panel = None
+            gc.collect()
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,11 @@
 
 Notable project changes are recorded here.
 
+## [1.0.2] - 2026-11-21
+
+### Mejoras respecto a `1.0.1`
+- **Separar y volver a unir audio y vídeo con clic derecho**: el menú contextual de los clips en la línea de tiempo ahora ofrece **Separar audio y vídeo** cuando están unidos, y **Unir audio y vídeo** cuando están separados (fusionando de nuevo el audio al clip de vídeo manteniendo volumen, tono y fundidos).
+
 ## [1.0.1] - 2026-11-21
 
 ### Mejoras respecto a `1.0.0`
